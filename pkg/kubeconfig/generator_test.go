@@ -60,7 +60,7 @@ func TestNewGenerator(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewGenerator(tt.prefix)
 			if g == nil {
-				t.Error("NewGenerator returned nil")
+				t.Fatal("NewGenerator returned nil")
 			}
 			if g.prefix != tt.prefix {
 				t.Errorf("prefix = %q, want %q", g.prefix, tt.prefix)
