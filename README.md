@@ -7,6 +7,9 @@ A tool that connects to a Rancher instance and generates a merged kubeconfig fil
 - **Cluster Discovery**: Automatically discovers all downstream Kubernetes clusters managed by your Rancher instance
 - **Kubeconfig Generation**: Generates a standard kubeconfig file compatible with any Kubernetes tooling
 - **Configurable Prefix**: Add custom prefixes to cluster names to identify which Rancher instance they belong to
+- **Multiple Authentication Methods**:
+  - API token authentication (access_key:secret_key)
+  - Username/password authentication
 - **Multiple Interfaces**:
   - Command-line interface (CLI) for scripting and automation
   - Web-based GUI for interactive use
@@ -53,6 +56,12 @@ rancher-kubeconfig-proxy generate \
   --url https://rancher.example.com \
   --token token-xxxxx:yyyyyyyyyyy
 
+# Using username/password
+rancher-kubeconfig-proxy generate \
+  --url https://rancher.example.com \
+  --username admin \
+  --password mypassword
+
 # With cluster name prefix
 rancher-kubeconfig-proxy generate \
   --url https://rancher.example.com \
@@ -62,7 +71,8 @@ rancher-kubeconfig-proxy generate \
 # Output to a specific file
 rancher-kubeconfig-proxy generate \
   --url https://rancher.example.com \
-  --token token-xxxxx:yyyyyyyyyyy \
+  --username admin \
+  --password mypassword \
   --output ~/.kube/rancher-config
 
 # Using access key and secret key separately
@@ -75,9 +85,16 @@ rancher-kubeconfig-proxy generate \
 #### List Clusters
 
 ```bash
+# Using API token
 rancher-kubeconfig-proxy list \
   --url https://rancher.example.com \
   --token token-xxxxx:yyyyyyyyyyy
+
+# Using username/password
+rancher-kubeconfig-proxy list \
+  --url https://rancher.example.com \
+  --username admin \
+  --password mypassword
 ```
 
 #### Start Web GUI
@@ -98,12 +115,14 @@ You can use environment variables instead of command-line flags:
 | `RANCHER_TOKEN` | API token (access_key:secret_key) |
 | `RANCHER_ACCESS_KEY` | API access key |
 | `RANCHER_SECRET_KEY` | API secret key |
+| `RANCHER_USERNAME` | Rancher username (for password auth) |
+| `RANCHER_PASSWORD` | Rancher password (for password auth) |
 | `RANCHER_CLUSTER_PREFIX` | Prefix for cluster names |
 | `RANCHER_KUBECONFIG_OUTPUT` | Output file path |
 | `RANCHER_INSECURE_SKIP_TLS_VERIFY` | Skip TLS verification (true/false) |
 | `RANCHER_CA_CERT` | Path to CA certificate file |
 
-Example using environment variables:
+Example using environment variables with API token:
 
 ```bash
 export RANCHER_URL=https://rancher.example.com
@@ -113,15 +132,29 @@ export RANCHER_CLUSTER_PREFIX=prod-
 rancher-kubeconfig-proxy generate
 ```
 
+Example using environment variables with username/password:
+
+```bash
+export RANCHER_URL=https://rancher.example.com
+export RANCHER_USERNAME=admin
+export RANCHER_PASSWORD=mypassword
+export RANCHER_CLUSTER_PREFIX=prod-
+
+rancher-kubeconfig-proxy generate
+```
+
 ### Desktop Application
 
 1. Download and install the desktop application for your platform
 2. Launch "Rancher Kubeconfig Proxy"
-3. Enter your Rancher URL and API token
-4. Click "Fetch Clusters" to see available clusters
-5. Select the clusters you want to include
-6. Optionally add a prefix for cluster names
-7. Click "Generate Kubeconfig" to download the file
+3. Enter your Rancher URL
+4. Choose your authentication method:
+   - **API Token**: Enter your Rancher API token (format: access_key:secret_key)
+   - **Username/Password**: Enter your Rancher username and password
+5. Click "Fetch Clusters" to see available clusters
+6. Select the clusters you want to include
+7. Optionally add a prefix for cluster names
+8. Click "Generate Kubeconfig" to download the file
 
 ## Getting a Rancher API Token
 

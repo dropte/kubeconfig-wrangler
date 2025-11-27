@@ -2,6 +2,7 @@
 package rancher
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -16,8 +17,25 @@ import (
 
 // Client is a Rancher API client
 type Client struct {
-	config     *config.Config
-	httpClient *http.Client
+	config      *config.Config
+	httpClient  *http.Client
+	bearerToken string // Used for password auth after login
+}
+
+// LoginRequest represents the request body for password authentication
+type LoginRequest struct {
+	Username     string `json:"username"`
+	Password     string `json:"password"`
+	ResponseType string `json:"responseType"`
+}
+
+// LoginResponse represents the response from the login endpoint
+type LoginResponse struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Token       string `json:"token"`
+	UserID      string `json:"userId"`
+	Description string `json:"description"`
 }
 
 // Cluster represents a Rancher managed cluster
@@ -74,10 +92,66 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		Timeout:   30 * time.Second,
 	}
 
-	return &Client{
+	client := &Client{
 		config:     cfg,
 		httpClient: httpClient,
-	}, nil
+	}
+
+	// If using password auth, perform login to get a bearer token
+	if cfg.UsePasswordAuth() {
+		if err := client.login(); err != nil {
+			return nil, fmt.Errorf("failed to authenticate with username/password: %w", err)
+		}
+	}
+
+	return client, nil
+}
+
+// login authenticates with username/password and stores the bearer token
+func (c *Client) login() error {
+	loginReq := LoginRequest{
+		Username:     c.config.Username,
+		Password:     c.config.Password,
+		ResponseType: "token",
+	}
+
+	body, err := json.Marshal(loginReq)
+	if err != nil {
+		return fmt.Errorf("failed to marshal login request: %w", err)
+	}
+
+	// Try local authentication first
+	url := fmt.Sprintf("%s/v3-public/localProviders/local?action=login", c.config.RancherURL)
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create login request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("login request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("login failed: status %d, body: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var loginResp LoginResponse
+	if err := json.NewDecoder(resp.Body).Decode(&loginResp); err != nil {
+		return fmt.Errorf("failed to decode login response: %w", err)
+	}
+
+	if loginResp.Token == "" {
+		return fmt.Errorf("login succeeded but no token was returned")
+	}
+
+	c.bearerToken = loginResp.Token
+	return nil
 }
 
 // doRequest performs an HTTP request with authentication
@@ -87,8 +161,14 @@ func (c *Client) doRequest(method, url string, body io.Reader) (*http.Response, 
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	username, password := c.config.GetBasicAuth()
-	req.SetBasicAuth(username, password)
+	// Use bearer token if we authenticated with password, otherwise use basic auth
+	if c.bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearerToken)
+	} else {
+		username, password := c.config.GetBasicAuth()
+		req.SetBasicAuth(username, password)
+	}
+
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 

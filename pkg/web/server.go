@@ -33,6 +33,8 @@ type ClusterInfo struct {
 type GenerateRequest struct {
 	RancherURL            string   `json:"rancherUrl"`
 	Token                 string   `json:"token"`
+	Username              string   `json:"username"`
+	Password              string   `json:"password"`
 	ClusterPrefix         string   `json:"clusterPrefix"`
 	InsecureSkipTLSVerify bool     `json:"insecureSkipTlsVerify"`
 	SelectedClusters      []string `json:"selectedClusters"`
@@ -108,6 +110,8 @@ func (s *Server) handleListClusters(w http.ResponseWriter, r *http.Request) {
 	cfg := &config.Config{
 		RancherURL:            req.RancherURL,
 		Token:                 req.Token,
+		Username:              req.Username,
+		Password:              req.Password,
 		InsecureSkipTLSVerify: req.InsecureSkipTLSVerify,
 	}
 
@@ -176,6 +180,8 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	cfg := &config.Config{
 		RancherURL:            req.RancherURL,
 		Token:                 req.Token,
+		Username:              req.Username,
+		Password:              req.Password,
 		ClusterPrefix:         req.ClusterPrefix,
 		InsecureSkipTLSVerify: req.InsecureSkipTLSVerify,
 	}
@@ -557,6 +563,42 @@ const indexHTML = `<!DOCTYPE html>
             font-size: 0.875rem;
         }
 
+        .auth-tabs {
+            display: flex;
+            gap: 0;
+            margin-bottom: 1rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .auth-tab {
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            border: none;
+            background: none;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
+        }
+
+        .auth-tab:hover {
+            color: var(--text-color);
+        }
+
+        .auth-tab.active {
+            color: var(--primary-color);
+            border-bottom-color: var(--primary-color);
+        }
+
+        .auth-content {
+            display: none;
+        }
+
+        .auth-content.active {
+            display: block;
+        }
+
         footer {
             text-align: center;
             padding: 1rem;
@@ -582,11 +624,36 @@ const indexHTML = `<!DOCTYPE html>
                 <input type="url" id="rancherUrl" placeholder="https://rancher.example.com">
                 <small>The URL of your Rancher server</small>
             </div>
+
             <div class="form-group">
-                <label for="token">API Token</label>
-                <input type="password" id="token" placeholder="token-xxxxx:yyyyyyy">
-                <small>Your Rancher API token (format: access_key:secret_key)</small>
+                <label>Authentication Method</label>
+                <div class="auth-tabs">
+                    <button type="button" class="auth-tab active" onclick="switchAuthMethod('token')">API Token</button>
+                    <button type="button" class="auth-tab" onclick="switchAuthMethod('password')">Username/Password</button>
+                </div>
             </div>
+
+            <div id="authToken" class="auth-content active">
+                <div class="form-group">
+                    <label for="token">API Token</label>
+                    <input type="password" id="token" placeholder="token-xxxxx:yyyyyyy">
+                    <small>Your Rancher API token (format: access_key:secret_key)</small>
+                </div>
+            </div>
+
+            <div id="authPassword" class="auth-content">
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" placeholder="admin">
+                    <small>Your Rancher username</small>
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" placeholder="Enter your password">
+                    <small>Your Rancher password</small>
+                </div>
+            </div>
+
             <div class="form-group">
                 <label for="clusterPrefix">Cluster Name Prefix</label>
                 <input type="text" id="clusterPrefix" placeholder="prod-">
@@ -637,6 +704,59 @@ const indexHTML = `<!DOCTYPE html>
 
     <script>
         let clusters = [];
+        let currentAuthMethod = 'token';
+
+        function switchAuthMethod(method) {
+            currentAuthMethod = method;
+
+            // Update tab styling
+            document.querySelectorAll('.auth-tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+
+            // Show/hide auth content
+            document.getElementById('authToken').classList.remove('active');
+            document.getElementById('authPassword').classList.remove('active');
+
+            if (method === 'token') {
+                document.getElementById('authToken').classList.add('active');
+            } else {
+                document.getElementById('authPassword').classList.add('active');
+            }
+        }
+
+        function getAuthCredentials() {
+            if (currentAuthMethod === 'token') {
+                return {
+                    token: document.getElementById('token').value.trim(),
+                    username: '',
+                    password: ''
+                };
+            } else {
+                return {
+                    token: '',
+                    username: document.getElementById('username').value.trim(),
+                    password: document.getElementById('password').value.trim()
+                };
+            }
+        }
+
+        function validateAuth() {
+            const creds = getAuthCredentials();
+            if (currentAuthMethod === 'token') {
+                if (!creds.token) {
+                    showError('Please enter your API token');
+                    return false;
+                }
+            } else {
+                if (!creds.username || !creds.password) {
+                    showError('Please enter both username and password');
+                    return false;
+                }
+            }
+            return true;
+        }
 
         function showError(message) {
             const alert = document.getElementById('errorAlert');
@@ -667,13 +787,18 @@ const indexHTML = `<!DOCTYPE html>
             hideAlerts();
 
             const rancherUrl = document.getElementById('rancherUrl').value.trim();
-            const token = document.getElementById('token').value.trim();
             const insecureSkipTls = document.getElementById('insecureSkipTls').checked;
 
-            if (!rancherUrl || !token) {
-                showError('Please enter both Rancher URL and API token');
+            if (!rancherUrl) {
+                showError('Please enter the Rancher URL');
                 return;
             }
+
+            if (!validateAuth()) {
+                return;
+            }
+
+            const creds = getAuthCredentials();
 
             const clustersCard = document.getElementById('clustersCard');
             const loadingClusters = document.getElementById('loadingClusters');
@@ -693,7 +818,9 @@ const indexHTML = `<!DOCTYPE html>
                     },
                     body: JSON.stringify({
                         rancherUrl: rancherUrl,
-                        token: token,
+                        token: creds.token,
+                        username: creds.username,
+                        password: creds.password,
                         insecureSkipTlsVerify: insecureSkipTls,
                     }),
                 });
@@ -794,10 +921,10 @@ const indexHTML = `<!DOCTYPE html>
             hideAlerts();
 
             const rancherUrl = document.getElementById('rancherUrl').value.trim();
-            const token = document.getElementById('token').value.trim();
             const clusterPrefix = document.getElementById('clusterPrefix').value;
             const insecureSkipTls = document.getElementById('insecureSkipTls').checked;
             const selectedClusters = getSelectedClusters();
+            const creds = getAuthCredentials();
 
             if (selectedClusters.length === 0) {
                 showError('Please select at least one cluster');
@@ -816,7 +943,9 @@ const indexHTML = `<!DOCTYPE html>
                     },
                     body: JSON.stringify({
                         rancherUrl: rancherUrl,
-                        token: token,
+                        token: creds.token,
+                        username: creds.username,
+                        password: creds.password,
                         clusterPrefix: clusterPrefix,
                         insecureSkipTlsVerify: insecureSkipTls,
                         selectedClusters: selectedClusters,

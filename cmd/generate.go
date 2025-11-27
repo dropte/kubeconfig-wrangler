@@ -12,14 +12,16 @@ import (
 )
 
 var (
-	rancherURL     string
-	accessKey      string
-	secretKey      string
-	token          string
-	clusterPrefix  string
-	outputPath     string
+	rancherURL      string
+	accessKey       string
+	secretKey       string
+	token           string
+	username        string
+	password        string
+	clusterPrefix   string
+	outputPath      string
 	insecureSkipTLS bool
-	caCert         string
+	caCert          string
 )
 
 // generateCmd represents the generate command
@@ -34,20 +36,25 @@ The kubeconfig file can be used with kubectl, helm, and other Kubernetes tools.
 Authentication can be provided via:
   - API token (--token or RANCHER_TOKEN)
   - Access key/secret key pair (--access-key/--secret-key or RANCHER_ACCESS_KEY/RANCHER_SECRET_KEY)
+  - Username/password (--username/--password or RANCHER_USERNAME/RANCHER_PASSWORD)
 
 Examples:
-  # Generate kubeconfig using token
+  # Generate kubeconfig using API token
   rancher-kubeconfig-proxy generate --url https://rancher.example.com --token token-xxxxx:yyyyyyy
+
+  # Generate kubeconfig using username/password
+  rancher-kubeconfig-proxy generate --url https://rancher.example.com --username admin --password mypassword
 
   # Generate kubeconfig with cluster name prefix
   rancher-kubeconfig-proxy generate --url https://rancher.example.com --token token-xxxxx:yyyyyyy --prefix "prod-"
 
   # Generate kubeconfig to a specific file
-  rancher-kubeconfig-proxy generate --url https://rancher.example.com --token token-xxxxx:yyyyyyy --output ~/.kube/rancher-config
+  rancher-kubeconfig-proxy generate --url https://rancher.example.com --username admin --password mypassword --output ~/.kube/rancher-config
 
   # Using environment variables
   export RANCHER_URL=https://rancher.example.com
-  export RANCHER_TOKEN=token-xxxxx:yyyyyyy
+  export RANCHER_USERNAME=admin
+  export RANCHER_PASSWORD=mypassword
   export RANCHER_CLUSTER_PREFIX=prod-
   rancher-kubeconfig-proxy generate`,
 	RunE: runGenerate,
@@ -58,6 +65,8 @@ func init() {
 	generateCmd.Flags().StringVarP(&accessKey, "access-key", "a", "", "Rancher API access key (env: RANCHER_ACCESS_KEY)")
 	generateCmd.Flags().StringVarP(&secretKey, "secret-key", "s", "", "Rancher API secret key (env: RANCHER_SECRET_KEY)")
 	generateCmd.Flags().StringVarP(&token, "token", "t", "", "Rancher API token (access_key:secret_key) (env: RANCHER_TOKEN)")
+	generateCmd.Flags().StringVar(&username, "username", "", "Rancher username for password auth (env: RANCHER_USERNAME)")
+	generateCmd.Flags().StringVar(&password, "password", "", "Rancher password for password auth (env: RANCHER_PASSWORD)")
 	generateCmd.Flags().StringVarP(&clusterPrefix, "prefix", "p", "", "Prefix to add to cluster names (env: RANCHER_CLUSTER_PREFIX)")
 	generateCmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output file path (default: stdout) (env: RANCHER_KUBECONFIG_OUTPUT)")
 	generateCmd.Flags().BoolVarP(&insecureSkipTLS, "insecure-skip-tls-verify", "k", false, "Skip TLS certificate verification (env: RANCHER_INSECURE_SKIP_TLS_VERIFY)")
@@ -80,6 +89,12 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	}
 	if token != "" {
 		cfg.Token = token
+	}
+	if username != "" {
+		cfg.Username = username
+	}
+	if password != "" {
+		cfg.Password = password
 	}
 	if clusterPrefix != "" {
 		cfg.ClusterPrefix = clusterPrefix
