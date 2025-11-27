@@ -85,7 +85,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpl.Execute(w, nil)
+	if err := tmpl.Execute(w, nil); err != nil {
+		log.Printf("Error executing template: %v", err)
+	}
 }
 
 // handleListClusters handles the cluster listing API endpoint
@@ -282,14 +284,18 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	// Return as downloadable file
 	w.Header().Set("Content-Type", "application/x-yaml")
 	w.Header().Set("Content-Disposition", "attachment; filename=kubeconfig.yaml")
-	w.Write(kubeconfigData)
+	if _, err := w.Write(kubeconfigData); err != nil {
+		log.Printf("Error writing kubeconfig response: %v", err)
+	}
 }
 
 // writeJSON writes a JSON response
 func (s *Server) writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("Error encoding JSON response: %v", err)
+	}
 }
 
 // indexHTML is the embedded HTML template for the web interface
