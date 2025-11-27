@@ -196,8 +196,11 @@ func TestClient_ListClusters_Unauthorized(t *testing.T) {
 		AuthMethod: config.AuthMethodToken,
 	}
 
-	client, _ := NewClient(cfg)
-	_, err := client.ListClusters()
+	client, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	_, err = client.ListClusters()
 	if err == nil {
 		t.Error("expected error for unauthorized request")
 	}
@@ -265,7 +268,10 @@ func TestClient_GetClusterKubeconfig_WithActionURL(t *testing.T) {
 		AuthMethod: config.AuthMethodToken,
 	}
 
-	client, _ := NewClient(cfg)
+	client, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
 
 	cluster := &Cluster{
 		ID:   "c-12345",
@@ -329,7 +335,10 @@ func TestClient_GetAllKubeconfigs(t *testing.T) {
 		AuthMethod: config.AuthMethodToken,
 	}
 
-	client, _ := NewClient(cfg)
+	client, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
 
 	kubeconfigs, err := client.GetAllKubeconfigs()
 	if err != nil {
@@ -370,7 +379,10 @@ func TestClient_GetAllKubeconfigs_NoClusters(t *testing.T) {
 		AuthMethod: config.AuthMethodToken,
 	}
 
-	client, _ := NewClient(cfg)
+	client, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
 
 	kubeconfigs, err := client.GetAllKubeconfigs()
 	if err != nil {
