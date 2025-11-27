@@ -44,6 +44,22 @@ Download the Electron-based desktop application from the releases page:
 - **macOS**: .dmg
 - **Windows**: .exe installer
 
+#### macOS Installation Note
+
+Since the macOS app is not code-signed with an Apple Developer certificate, macOS Gatekeeper may show a message saying the app "is damaged and can't be opened."
+
+To fix this, open Terminal and run:
+
+```bash
+# If you've already mounted the DMG and copied the app:
+xattr -cr "/Applications/Rancher Kubeconfig Proxy.app"
+
+# Or clear the quarantine attribute on the DMG first:
+xattr -cr ~/Downloads/Rancher\ Kubeconfig\ Proxy-*.dmg
+```
+
+Alternatively, you can right-click the app and select "Open" instead of double-clicking.
+
 ## Usage
 
 ### CLI
