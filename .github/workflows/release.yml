@@ -1,0 +1,249 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: get_version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref_name }}
+          draft: true
+          prerelease: false
+          body: |
+            ## Rancher Kubeconfig Proxy ${{ github.ref_name }}
+
+            ### Downloads
+
+            #### CLI Binaries
+            - **Linux (amd64)**: `rancher-kubeconfig-proxy-linux-amd64`
+            - **Linux (arm64)**: `rancher-kubeconfig-proxy-linux-arm64`
+            - **macOS (amd64)**: `rancher-kubeconfig-proxy-darwin-amd64`
+            - **macOS (arm64)**: `rancher-kubeconfig-proxy-darwin-arm64`
+            - **Windows (amd64)**: `rancher-kubeconfig-proxy-windows-amd64.exe`
+
+            #### Desktop Application (Electron)
+            - **Linux**: AppImage, .deb, .rpm
+            - **macOS**: .dmg
+            - **Windows**: .exe installer
+
+            ### Changelog
+            <!-- Add changelog here -->
+
+  build-cli:
+    name: Build CLI
+    runs-on: ubuntu-latest
+    needs: create-release
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+        exclude:
+          - goos: windows
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p bin
+          EXT=""
+          if [ "$GOOS" = "windows" ]; then
+            EXT=".exe"
+          fi
+          go build -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
+            -o bin/rancher-kubeconfig-proxy-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} .
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: bin/rancher-kubeconfig-proxy-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
+          asset_name: rancher-kubeconfig-proxy-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
+          asset_content_type: application/octet-stream
+
+  build-electron-linux:
+    name: Build Electron (Linux)
+    runs-on: ubuntu-latest
+    needs: create-release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build Go backend
+        run: |
+          mkdir -p bin/linux
+          GOOS=linux GOARCH=amd64 go build \
+            -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
+            -o bin/linux/rancher-kubeconfig-proxy .
+
+      - name: Install Electron dependencies
+        working-directory: electron
+        run: npm ci
+
+      - name: Build Electron app
+        working-directory: electron
+        run: npm run build:linux
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload AppImage
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: electron/dist/Rancher Kubeconfig Proxy-${{ needs.create-release.outputs.version }}.AppImage
+          asset_name: Rancher-Kubeconfig-Proxy-${{ needs.create-release.outputs.version }}.AppImage
+          asset_content_type: application/octet-stream
+        continue-on-error: true
+
+      - name: Upload deb
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: electron/dist/rancher-kubeconfig-proxy_${{ needs.create-release.outputs.version }}_amd64.deb
+          asset_name: rancher-kubeconfig-proxy_${{ needs.create-release.outputs.version }}_amd64.deb
+          asset_content_type: application/vnd.debian.binary-package
+        continue-on-error: true
+
+  build-electron-macos:
+    name: Build Electron (macOS)
+    runs-on: macos-latest
+    needs: create-release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build Go backend (Intel)
+        run: |
+          mkdir -p bin/darwin
+          GOOS=darwin GOARCH=amd64 go build \
+            -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
+            -o bin/darwin/rancher-kubeconfig-proxy .
+
+      - name: Build Go backend (Apple Silicon)
+        run: |
+          mkdir -p bin/darwin-arm64
+          GOOS=darwin GOARCH=arm64 go build \
+            -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
+            -o bin/darwin-arm64/rancher-kubeconfig-proxy .
+
+      - name: Install Electron dependencies
+        working-directory: electron
+        run: npm ci
+
+      - name: Build Electron app
+        working-directory: electron
+        run: npm run build:mac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload DMG
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: electron/dist/Rancher Kubeconfig Proxy-${{ needs.create-release.outputs.version }}.dmg
+          asset_name: Rancher-Kubeconfig-Proxy-${{ needs.create-release.outputs.version }}.dmg
+          asset_content_type: application/octet-stream
+        continue-on-error: true
+
+  build-electron-windows:
+    name: Build Electron (Windows)
+    runs-on: windows-latest
+    needs: create-release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build Go backend
+        shell: bash
+        run: |
+          mkdir -p bin/win32
+          GOOS=windows GOARCH=amd64 go build \
+            -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
+            -o bin/win32/rancher-kubeconfig-proxy.exe .
+
+      - name: Install Electron dependencies
+        working-directory: electron
+        run: npm ci
+
+      - name: Build Electron app
+        working-directory: electron
+        run: npm run build:win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Windows Installer
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: electron/dist/Rancher Kubeconfig Proxy Setup ${{ needs.create-release.outputs.version }}.exe
+          asset_name: Rancher-Kubeconfig-Proxy-Setup-${{ needs.create-release.outputs.version }}.exe
+          asset_content_type: application/octet-stream
+        continue-on-error: true
