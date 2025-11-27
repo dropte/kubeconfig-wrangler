@@ -38,7 +38,6 @@ Thumbs.db
 # Electron
 electron/node_modules/
 electron/dist/
-electron/package-lock.json
 
 # Build artifacts
 dist/
