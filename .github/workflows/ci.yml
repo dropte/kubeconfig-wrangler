@@ -89,6 +89,12 @@ jobs:
     name: Build Electron App
     runs-on: ${{ matrix.os }}
     needs: [lint, test]
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     strategy:
       matrix:
         include:
@@ -148,15 +154,10 @@ jobs:
       - name: Build Electron app (Linux)
         if: matrix.platform == 'linux'
         working-directory: electron
-        run: npm run build:linux
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run build:linux -- --publish never
 
       - name: Import Code Signing Certificate (macOS)
         if: matrix.platform == 'darwin' && env.APPLE_CERTIFICATE != ''
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
           # Create a temporary keychain
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
@@ -178,19 +179,14 @@ jobs:
       - name: Build Electron app (macOS)
         if: matrix.platform == 'darwin'
         working-directory: electron
-        run: npm run build:mac
+        run: npm run build:mac -- --publish never
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
       - name: Notarize macOS app
         if: matrix.platform == 'darwin' && env.APPLE_ID != ''
         working-directory: electron
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           # Find the DMG file (notarytool requires zip, pkg, or dmg - not .app directly)
           DMG_PATH=$(find dist -name "*.dmg" -type f | head -1)
@@ -204,7 +200,7 @@ jobs:
           # Submit for notarization
           xcrun notarytool submit "$DMG_PATH" \
             --apple-id "$APPLE_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --password "$APPLE_ID_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
             --wait || { echo "Notarization failed, continuing anyway..."; exit 0; }
 
@@ -215,9 +211,7 @@ jobs:
       - name: Build Electron app (Windows)
         if: matrix.platform == 'windows'
         working-directory: electron
-        run: npm run build:win
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run build:win -- --publish never
 
       - name: Upload Electron artifact
         uses: actions/upload-artifact@v4
