@@ -208,7 +208,9 @@ jobs:
 
       - name: Build Electron app
         working-directory: electron
-        run: npm run build:linux -- --publish never
+        run: npm run build:linux
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload AppImage
         uses: actions/upload-release-asset@v1
@@ -285,8 +287,9 @@ jobs:
 
       - name: Build Electron app
         working-directory: electron
-        run: npm run build:mac -- --publish never
+        run: npm run build:mac
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
@@ -351,7 +354,9 @@ jobs:
 
       - name: Build Electron app
         working-directory: electron
-        run: npm run build:win -- --publish never
+        run: npm run build:win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Windows Installer
         uses: actions/upload-release-asset@v1
