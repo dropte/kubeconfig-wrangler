@@ -110,11 +110,14 @@ jobs:
           go-version: '1.21'
 
       - name: Import Code Signing Certificate
-        if: env.APPLE_CERTIFICATE != ''
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "No certificate configured, skipping signing setup"
+            exit 0
+          fi
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -145,12 +148,15 @@ jobs:
           codesign --verify --verbose bin/rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}
 
       - name: Notarize Binary
-        if: env.APPLE_ID != ''
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          if [ -z "$APPLE_ID" ]; then
+            echo "No Apple ID configured, skipping notarization"
+            exit 0
+          fi
           # Zip the binary for notarization
           cd bin
           zip rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}.zip rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}
@@ -256,11 +262,14 @@ jobs:
             -o bin/mac/rancher-kubeconfig-proxy .
 
       - name: Import Code Signing Certificate
-        if: env.APPLE_CERTIFICATE != ''
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "No certificate configured, skipping signing setup"
+            exit 0
+          fi
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -284,13 +293,16 @@ jobs:
           CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
       - name: Notarize DMG
-        if: env.APPLE_ID != ''
         working-directory: electron
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          if [ -z "$APPLE_ID" ]; then
+            echo "No Apple ID configured, skipping notarization"
+            exit 0
+          fi
           DMG_PATH=$(find dist -name "*.dmg" -type f | head -1)
           if [ -n "$DMG_PATH" ]; then
             echo "Notarizing $DMG_PATH..."
