@@ -58,7 +58,7 @@ jobs:
     needs: create-release
     strategy:
       matrix:
-        goos: [linux, darwin, windows]
+        goos: [linux, windows]
         goarch: [amd64, arm64]
         exclude:
           - goos: windows
@@ -92,6 +92,86 @@ jobs:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: bin/rancher-kubeconfig-proxy-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
           asset_name: rancher-kubeconfig-proxy-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
+          asset_content_type: application/octet-stream
+
+  build-cli-macos:
+    name: Build CLI (macOS)
+    runs-on: macos-latest
+    needs: create-release
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Import Code Signing Certificate
+        if: ${{ env.APPLE_CERTIFICATE != '' }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          # Find the signing identity
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+          echo "SIGNING_IDENTITY=$IDENTITY" >> $GITHUB_ENV
+
+      - name: Build
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p bin
+          go build -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
+            -o bin/rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }} .
+
+      - name: Sign Binary
+        if: ${{ env.SIGNING_IDENTITY != '' }}
+        run: |
+          codesign --force --options runtime --sign "$SIGNING_IDENTITY" \
+            bin/rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}
+          codesign --verify --verbose bin/rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}
+
+      - name: Notarize Binary
+        if: ${{ env.APPLE_ID != '' && env.SIGNING_IDENTITY != '' }}
+        run: |
+          # Zip the binary for notarization
+          cd bin
+          zip rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}.zip rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}
+
+          # Submit for notarization
+          xcrun notarytool submit rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}.zip \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait || echo "Notarization failed, continuing..."
+
+          # Remove the zip
+          rm rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}.zip
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: bin/rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}
+          asset_name: rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}
           asset_content_type: application/octet-stream
 
   build-electron-linux:
@@ -154,6 +234,12 @@ jobs:
     name: Build Electron (macOS)
     runs-on: macos-latest
     needs: create-release
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
 
@@ -167,19 +253,25 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Build Go backend (Intel)
+      - name: Build Go backend
         run: |
-          mkdir -p bin/darwin
-          GOOS=darwin GOARCH=amd64 go build \
-            -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
-            -o bin/darwin/rancher-kubeconfig-proxy .
-
-      - name: Build Go backend (Apple Silicon)
-        run: |
-          mkdir -p bin/darwin-arm64
+          mkdir -p bin/mac
           GOOS=darwin GOARCH=arm64 go build \
             -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
-            -o bin/darwin-arm64/rancher-kubeconfig-proxy .
+            -o bin/mac/rancher-kubeconfig-proxy .
+
+      - name: Import Code Signing Certificate
+        if: ${{ env.APPLE_CERTIFICATE != '' }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
       - name: Install Electron dependencies
         working-directory: electron
@@ -190,6 +282,23 @@ jobs:
         run: npm run build:mac
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Notarize DMG
+        if: ${{ env.APPLE_ID != '' && env.APPLE_CERTIFICATE != '' }}
+        working-directory: electron
+        run: |
+          DMG_PATH=$(find dist -name "*.dmg" -type f | head -1)
+          if [ -n "$DMG_PATH" ]; then
+            echo "Notarizing $DMG_PATH..."
+            xcrun notarytool submit "$DMG_PATH" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_ID_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait || echo "Notarization failed, continuing..."
+            xcrun stapler staple "$DMG_PATH" || echo "Stapling failed, continuing..."
+          fi
 
       - name: Upload DMG
         uses: actions/upload-release-asset@v1
@@ -222,10 +331,10 @@ jobs:
       - name: Build Go backend
         shell: bash
         run: |
-          mkdir -p bin/win32
+          mkdir -p bin/win
           GOOS=windows GOARCH=amd64 go build \
             -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
-            -o bin/win32/rancher-kubeconfig-proxy.exe .
+            -o bin/win/rancher-kubeconfig-proxy.exe .
 
       - name: Install Electron dependencies
         working-directory: electron
