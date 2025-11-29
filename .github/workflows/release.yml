@@ -198,15 +198,17 @@ jobs:
             -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
             -o bin/linux/rancher-kubeconfig-proxy .
 
+      - name: Update package.json version
+        working-directory: electron
+        run: npm version ${{ needs.create-release.outputs.version }} --no-git-tag-version
+
       - name: Install Electron dependencies
         working-directory: electron
         run: npm ci
 
       - name: Build Electron app
         working-directory: electron
-        run: npm run build:linux
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run build:linux -- --publish never
 
       - name: Upload AppImage
         uses: actions/upload-release-asset@v1
@@ -260,6 +262,10 @@ jobs:
             -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
             -o bin/mac/rancher-kubeconfig-proxy .
 
+      - name: Update package.json version
+        working-directory: electron
+        run: npm version ${{ needs.create-release.outputs.version }} --no-git-tag-version
+
       - name: Import Code Signing Certificate
         if: ${{ env.APPLE_CERTIFICATE != '' }}
         run: |
@@ -279,9 +285,8 @@ jobs:
 
       - name: Build Electron app
         working-directory: electron
-        run: npm run build:mac
+        run: npm run build:mac -- --publish never
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
@@ -336,15 +341,17 @@ jobs:
             -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
             -o bin/win/rancher-kubeconfig-proxy.exe .
 
+      - name: Update package.json version
+        working-directory: electron
+        run: npm version ${{ needs.create-release.outputs.version }} --no-git-tag-version
+
       - name: Install Electron dependencies
         working-directory: electron
         run: npm ci
 
       - name: Build Electron app
         working-directory: electron
-        run: npm run build:win
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run build:win -- --publish never
 
       - name: Upload Windows Installer
         uses: actions/upload-release-asset@v1
