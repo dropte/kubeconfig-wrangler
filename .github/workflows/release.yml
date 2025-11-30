@@ -33,16 +33,16 @@ jobs:
           draft: true
           prerelease: false
           body: |
-            ## Rancher Kubeconfig Proxy ${{ github.ref_name }}
+            ## Kubeconfig Wrangler ${{ github.ref_name }}
 
             ### Downloads
 
             #### CLI Binaries
-            - **Linux (amd64)**: `rancher-kubeconfig-proxy-linux-amd64`
-            - **Linux (arm64)**: `rancher-kubeconfig-proxy-linux-arm64`
-            - **macOS (amd64)**: `rancher-kubeconfig-proxy-darwin-amd64`
-            - **macOS (arm64)**: `rancher-kubeconfig-proxy-darwin-arm64`
-            - **Windows (amd64)**: `rancher-kubeconfig-proxy-windows-amd64.exe`
+            - **Linux (amd64)**: `kubeconfig-wrangler-linux-amd64`
+            - **Linux (arm64)**: `kubeconfig-wrangler-linux-arm64`
+            - **macOS (amd64)**: `kubeconfig-wrangler-darwin-amd64`
+            - **macOS (arm64)**: `kubeconfig-wrangler-darwin-arm64`
+            - **Windows (amd64)**: `kubeconfig-wrangler-windows-amd64.exe`
 
             #### Desktop Application (Electron)
             - **Linux**: AppImage, .deb, .rpm
@@ -81,8 +81,8 @@ jobs:
           if [ "$GOOS" = "windows" ]; then
             EXT=".exe"
           fi
-          go build -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
-            -o bin/rancher-kubeconfig-proxy-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} .
+          go build -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ needs.create-release.outputs.version }}" \
+            -o bin/kubeconfig-wrangler-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} .
 
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1
@@ -90,8 +90,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: bin/rancher-kubeconfig-proxy-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
-          asset_name: rancher-kubeconfig-proxy-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
+          asset_path: bin/kubeconfig-wrangler-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
+          asset_name: kubeconfig-wrangler-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
           asset_content_type: application/octet-stream
 
   build-cli-macos:
@@ -137,32 +137,32 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p bin
-          go build -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
-            -o bin/rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }} .
+          go build -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ needs.create-release.outputs.version }}" \
+            -o bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }} .
 
       - name: Sign Binary
         if: ${{ env.SIGNING_IDENTITY != '' }}
         run: |
           codesign --force --options runtime --sign "$SIGNING_IDENTITY" \
-            bin/rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}
-          codesign --verify --verbose bin/rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}
+            bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }}
+          codesign --verify --verbose bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }}
 
       - name: Notarize Binary
         if: ${{ env.APPLE_ID != '' && env.SIGNING_IDENTITY != '' }}
         run: |
           # Zip the binary for notarization
           cd bin
-          zip rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}.zip rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}
+          zip kubeconfig-wrangler-darwin-${{ matrix.goarch }}.zip kubeconfig-wrangler-darwin-${{ matrix.goarch }}
 
           # Submit for notarization
-          xcrun notarytool submit rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}.zip \
+          xcrun notarytool submit kubeconfig-wrangler-darwin-${{ matrix.goarch }}.zip \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_ID_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
             --wait || echo "Notarization failed, continuing..."
 
           # Remove the zip
-          rm rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}.zip
+          rm kubeconfig-wrangler-darwin-${{ matrix.goarch }}.zip
 
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1
@@ -170,8 +170,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: bin/rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}
-          asset_name: rancher-kubeconfig-proxy-darwin-${{ matrix.goarch }}
+          asset_path: bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }}
+          asset_name: kubeconfig-wrangler-darwin-${{ matrix.goarch }}
           asset_content_type: application/octet-stream
 
   build-electron-linux:
@@ -195,8 +195,8 @@ jobs:
         run: |
           mkdir -p bin/linux
           GOOS=linux GOARCH=amd64 go build \
-            -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
-            -o bin/linux/rancher-kubeconfig-proxy .
+            -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ needs.create-release.outputs.version }}" \
+            -o bin/linux/kubeconfig-wrangler .
 
       - name: Update package.json version
         working-directory: electron
@@ -218,8 +218,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: electron/dist/Rancher Kubeconfig Proxy-${{ needs.create-release.outputs.version }}.AppImage
-          asset_name: Rancher-Kubeconfig-Proxy-${{ needs.create-release.outputs.version }}.AppImage
+          asset_path: electron/dist/Kubeconfig Wrangler-${{ needs.create-release.outputs.version }}.AppImage
+          asset_name: Kubeconfig-Wrangler-${{ needs.create-release.outputs.version }}.AppImage
           asset_content_type: application/octet-stream
         continue-on-error: true
 
@@ -229,8 +229,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: electron/dist/rancher-kubeconfig-proxy_${{ needs.create-release.outputs.version }}_amd64.deb
-          asset_name: rancher-kubeconfig-proxy_${{ needs.create-release.outputs.version }}_amd64.deb
+          asset_path: electron/dist/kubeconfig-wrangler_${{ needs.create-release.outputs.version }}_amd64.deb
+          asset_name: kubeconfig-wrangler_${{ needs.create-release.outputs.version }}_amd64.deb
           asset_content_type: application/vnd.debian.binary-package
         continue-on-error: true
 
@@ -261,8 +261,8 @@ jobs:
         run: |
           mkdir -p bin/mac
           GOOS=darwin GOARCH=arm64 go build \
-            -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
-            -o bin/mac/rancher-kubeconfig-proxy .
+            -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ needs.create-release.outputs.version }}" \
+            -o bin/mac/kubeconfig-wrangler .
 
       - name: Update package.json version
         working-directory: electron
@@ -314,8 +314,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: electron/dist/Rancher Kubeconfig Proxy-${{ needs.create-release.outputs.version }}.dmg
-          asset_name: Rancher-Kubeconfig-Proxy-${{ needs.create-release.outputs.version }}.dmg
+          asset_path: electron/dist/Kubeconfig Wrangler-${{ needs.create-release.outputs.version }}.dmg
+          asset_name: Kubeconfig-Wrangler-${{ needs.create-release.outputs.version }}.dmg
           asset_content_type: application/octet-stream
         continue-on-error: true
 
@@ -341,8 +341,8 @@ jobs:
         run: |
           mkdir -p bin/win
           GOOS=windows GOARCH=amd64 go build \
-            -ldflags "-X github.com/rancher-kubeconfig-proxy/cmd.Version=${{ needs.create-release.outputs.version }}" \
-            -o bin/win/rancher-kubeconfig-proxy.exe .
+            -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ needs.create-release.outputs.version }}" \
+            -o bin/win/kubeconfig-wrangler.exe .
 
       - name: Update package.json version
         working-directory: electron
@@ -364,7 +364,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: electron/dist/Rancher Kubeconfig Proxy Setup ${{ needs.create-release.outputs.version }}.exe
-          asset_name: Rancher-Kubeconfig-Proxy-Setup-${{ needs.create-release.outputs.version }}.exe
+          asset_path: electron/dist/Kubeconfig Wrangler Setup ${{ needs.create-release.outputs.version }}.exe
+          asset_name: Kubeconfig-Wrangler-Setup-${{ needs.create-release.outputs.version }}.exe
           asset_content_type: application/octet-stream
         continue-on-error: true
