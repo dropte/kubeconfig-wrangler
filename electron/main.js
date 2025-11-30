@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, powerMonitor } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -161,6 +161,34 @@ function createWindow() {
     shell.openExternal(url);
     return { action: 'deny' };
   });
+
+  // Handle page load failures (e.g., after sleep/resume)
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+    console.log('Page failed to load:', errorCode, errorDescription);
+    // Retry loading after a short delay
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        console.log('Retrying page load...');
+        mainWindow.loadURL(`http://127.0.0.1:${serverPort}`);
+      }
+    }, 1000);
+  });
+
+  // Handle render process crashes
+  mainWindow.webContents.on('render-process-gone', (event, details) => {
+    console.log('Render process gone:', details.reason);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.reload();
+    }
+  });
+
+  // Handle unresponsive page
+  mainWindow.webContents.on('unresponsive', () => {
+    console.log('Page became unresponsive, reloading...');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.reload();
+    }
+  });
 }
 
 // IPC handlers for save dialog
@@ -252,4 +280,34 @@ app.on('before-quit', () => {
 
 app.on('will-quit', () => {
   stopBackend();
+});
+
+// Handle system power events
+powerMonitor.on('resume', () => {
+  console.log('System resumed from sleep');
+  // Give the network a moment to reconnect, then reload
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      console.log('Reloading window after resume...');
+      mainWindow.reload();
+    }
+  }, 1500);
+});
+
+powerMonitor.on('unlock-screen', () => {
+  console.log('Screen unlocked');
+  // Check if page needs reload by trying to reload if blank
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.executeJavaScript('document.body.innerHTML.length')
+      .then(length => {
+        if (length === 0) {
+          console.log('Page appears blank, reloading...');
+          mainWindow.reload();
+        }
+      })
+      .catch(() => {
+        console.log('Could not check page content, reloading...');
+        mainWindow.reload();
+      });
+  }
 });
