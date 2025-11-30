@@ -1,4 +1,4 @@
-// Package cmd provides the CLI commands for rancher-kubeconfig-proxy
+// Package cmd provides the CLI commands for kubeconfig-wrangler
 package cmd
 
 import (
@@ -15,17 +15,17 @@ var (
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "rancher-kubeconfig-proxy",
-	Short: "Generate kubeconfig files from Rancher managed clusters",
-	Long: `rancher-kubeconfig-proxy is a tool that connects to a Rancher instance
-and generates a merged kubeconfig file containing all downstream Kubernetes
-clusters managed by that Rancher instance.
+	Use:   "kubeconfig-wrangler",
+	Short: "Generate kubeconfig files from multiple sources",
+	Long: `kubeconfig-wrangler is a tool that connects to Rancher instances, AWS EKS,
+and other sources to generate merged kubeconfig files containing all your
+Kubernetes clusters.
 
 The generated kubeconfig can be used by any standard Kubernetes tools like
 kubectl, helm, k9s, and other applications that support kubeconfig files.
 
 Cluster names can be prefixed with a configurable string to help identify
-which Rancher instance they belong to.`,
+which source they belong to.`,
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -47,6 +47,6 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print the version number",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("rancher-kubeconfig-proxy %s\n", Version)
+		fmt.Printf("kubeconfig-wrangler %s\n", Version)
 	},
 }

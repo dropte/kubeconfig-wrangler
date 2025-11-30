@@ -1,12 +1,22 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeImage } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const net = require('net');
+const crypto = require('crypto');
+
+// Set app name for development
+app.setName('Kubeconfig Wrangler');
 
 let mainWindow;
 let backendProcess;
 let serverPort = 18080;
+let serverToken = '';
+
+// Generate a cryptographically secure random token
+function generateSecurityToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
 
 // Find an available port
 async function findAvailablePort(startPort) {
@@ -38,7 +48,7 @@ function getPlatformDir() {
 function getBackendPath() {
   const isDev = !app.isPackaged;
   const isWindows = process.platform === 'win32';
-  const binaryName = isWindows ? 'rancher-kubeconfig-proxy.exe' : 'rancher-kubeconfig-proxy';
+  const binaryName = isWindows ? 'kubeconfig-wrangler.exe' : 'kubeconfig-wrangler';
 
   if (isDev) {
     // In development, look for the binary in the parent bin directory
@@ -60,7 +70,7 @@ async function startBackend() {
     const platformDir = getPlatformDir();
     dialog.showErrorBox(
       'Backend Not Found',
-      `The backend server binary was not found at:\n${backendPath}\n\nPlease build the Go backend first using:\ngo build -o bin/${platformDir}/rancher-kubeconfig-proxy`
+      `The backend server binary was not found at:\n${backendPath}\n\nPlease build the Go backend first using:\ngo build -o bin/${platformDir}/kubeconfig-wrangler`
     );
     return false;
   }
@@ -68,11 +78,15 @@ async function startBackend() {
   // Find an available port
   serverPort = await findAvailablePort(18080);
 
+  // Generate a new security token for this session
+  serverToken = generateSecurityToken();
+
   console.log('Starting backend server on port', serverPort);
   console.log('Backend path:', backendPath);
+  console.log('Security token enabled');
 
   return new Promise((resolve) => {
-    backendProcess = spawn(backendPath, ['serve', '--port', serverPort.toString(), '--addr', '127.0.0.1'], {
+    backendProcess = spawn(backendPath, ['serve', '--port', serverPort.toString(), '--addr', '127.0.0.1', '--token', serverToken], {
       stdio: ['ignore', 'pipe', 'pipe']
     });
 
@@ -125,7 +139,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js')
     },
     icon: path.join(__dirname, 'build', 'icon.png'),
-    title: 'Rancher Kubeconfig Proxy',
+    title: 'Kubeconfig Wrangler',
     show: false // Don't show until ready
   });
 
@@ -171,8 +185,40 @@ ipcMain.handle('save-file', async (event, { filePath, content }) => {
   }
 });
 
+// IPC handlers for open dialog (file loading)
+ipcMain.handle('show-open-dialog', async (event, options) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: options.title || 'Open File',
+    defaultPath: options.defaultPath,
+    filters: options.filters || [
+      { name: 'YAML Files', extensions: ['yaml', 'yml'] },
+      { name: 'All Files', extensions: ['*'] }
+    ],
+    properties: ['openFile']
+  });
+  return result;
+});
+
+ipcMain.handle('read-file', async (event, { filePath }) => {
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    return { success: true, content };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 // App lifecycle events
 app.whenReady().then(async () => {
+  // Set dock icon on macOS (for development)
+  if (process.platform === 'darwin' && app.dock) {
+    const iconPath = path.join(__dirname, 'build', 'icon.png');
+    if (fs.existsSync(iconPath)) {
+      const icon = nativeImage.createFromPath(iconPath);
+      app.dock.setIcon(icon);
+    }
+  }
+
   const backendStarted = await startBackend();
 
   if (!backendStarted) {

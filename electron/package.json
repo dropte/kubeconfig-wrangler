@@ -1,17 +1,17 @@
 {
-  "name": "rancher-kubeconfig-proxy",
+  "name": "kubeconfig-wrangler",
   "version": "1.0.0",
-  "description": "Generate kubeconfig files from Rancher managed clusters",
+  "description": "Wrangle kubeconfigs from multiple sources",
   "main": "main.js",
   "author": {
-    "name": "Rancher Kubeconfig Proxy",
+    "name": "Kubeconfig Wrangler",
     "email": "noreply@example.com"
   },
   "license": "MIT",
-  "homepage": "https://github.com/dropte/rancher-kubeconfig-proxy",
+  "homepage": "https://github.com/dropte/kubeconfig-wrangler",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dropte/rancher-kubeconfig-proxy.git"
+    "url": "https://github.com/dropte/kubeconfig-wrangler.git"
   },
   "scripts": {
     "start": "electron .",
@@ -30,8 +30,8 @@
     "electron-builder": "^24.9.1"
   },
   "build": {
-    "appId": "com.rancher-kubeconfig-proxy",
-    "productName": "Rancher Kubeconfig Proxy",
+    "appId": "com.kubeconfig-wrangler",
+    "productName": "Kubeconfig Wrangler",
     "directories": {
       "output": "dist",
       "buildResources": "build"

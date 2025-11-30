@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rancher-kubeconfig-proxy/pkg/config"
-	"github.com/rancher-kubeconfig-proxy/pkg/rancher"
+	"github.com/kubeconfig-wrangler/pkg/config"
+	"github.com/kubeconfig-wrangler/pkg/rancher"
 )
 
 // listCmd represents the list command
@@ -20,16 +20,16 @@ Rancher instance, showing their name, ID, state, and provider.
 
 Examples:
   # List all clusters using API token
-  rancher-kubeconfig-proxy list --url https://rancher.example.com --token token-xxxxx:yyyyyyy
+  kubeconfig-wrangler list --url https://rancher.example.com --token token-xxxxx:yyyyyyy
 
   # List all clusters using username/password
-  rancher-kubeconfig-proxy list --url https://rancher.example.com --username admin --password mypassword
+  kubeconfig-wrangler list --url https://rancher.example.com --username admin --password mypassword
 
   # Using environment variables
   export RANCHER_URL=https://rancher.example.com
   export RANCHER_USERNAME=admin
   export RANCHER_PASSWORD=mypassword
-  rancher-kubeconfig-proxy list`,
+  kubeconfig-wrangler list`,
 	RunE: runList,
 }
 

@@ -1,4 +1,4 @@
-// Package config provides configuration handling for the rancher-kubeconfig-proxy
+// Package config provides configuration handling for kubeconfig-wrangler
 package config
 
 import (

@@ -5,12 +5,13 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rancher-kubeconfig-proxy/pkg/web"
+	"github.com/kubeconfig-wrangler/pkg/web"
 )
 
 var (
-	serverAddr string
-	serverPort int
+	serverAddr  string
+	serverPort  int
+	serverToken string
 )
 
 // serveCmd represents the serve command
@@ -29,13 +30,13 @@ The web interface allows you to:
 
 Examples:
   # Start the server on default port (8080)
-  rancher-kubeconfig-proxy serve
+  kubeconfig-wrangler serve
 
   # Start the server on a custom port
-  rancher-kubeconfig-proxy serve --port 3000
+  kubeconfig-wrangler serve --port 3000
 
   # Start the server on a specific address
-  rancher-kubeconfig-proxy serve --addr 0.0.0.0 --port 8080`,
+  kubeconfig-wrangler serve --addr 0.0.0.0 --port 8080`,
 	RunE: runServe,
 }
 
@@ -43,10 +44,11 @@ func init() {
 	rootCmd.AddCommand(serveCmd)
 	serveCmd.Flags().StringVar(&serverAddr, "addr", "127.0.0.1", "Address to bind the server to")
 	serveCmd.Flags().IntVar(&serverPort, "port", 8080, "Port to run the server on")
+	serveCmd.Flags().StringVar(&serverToken, "token", "", "Security token for API authentication")
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
 	addr := fmt.Sprintf("%s:%d", serverAddr, serverPort)
-	server := web.NewServer(addr)
+	server := web.NewServer(addr, serverToken)
 	return server.Start()
 }

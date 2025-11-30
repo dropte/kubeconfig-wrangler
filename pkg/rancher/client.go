@@ -12,7 +12,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/rancher-kubeconfig-proxy/pkg/config"
+	"github.com/kubeconfig-wrangler/pkg/config"
 )
 
 // Client is a Rancher API client

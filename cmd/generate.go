@@ -6,9 +6,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rancher-kubeconfig-proxy/pkg/config"
-	"github.com/rancher-kubeconfig-proxy/pkg/kubeconfig"
-	"github.com/rancher-kubeconfig-proxy/pkg/rancher"
+	"github.com/kubeconfig-wrangler/pkg/config"
+	"github.com/kubeconfig-wrangler/pkg/kubeconfig"
+	"github.com/kubeconfig-wrangler/pkg/rancher"
 )
 
 var (
@@ -40,23 +40,23 @@ Authentication can be provided via:
 
 Examples:
   # Generate kubeconfig using API token
-  rancher-kubeconfig-proxy generate --url https://rancher.example.com --token token-xxxxx:yyyyyyy
+  kubeconfig-wrangler generate --url https://rancher.example.com --token token-xxxxx:yyyyyyy
 
   # Generate kubeconfig using username/password
-  rancher-kubeconfig-proxy generate --url https://rancher.example.com --username admin --password mypassword
+  kubeconfig-wrangler generate --url https://rancher.example.com --username admin --password mypassword
 
   # Generate kubeconfig with cluster name prefix
-  rancher-kubeconfig-proxy generate --url https://rancher.example.com --token token-xxxxx:yyyyyyy --prefix "prod-"
+  kubeconfig-wrangler generate --url https://rancher.example.com --token token-xxxxx:yyyyyyy --prefix "prod-"
 
   # Generate kubeconfig to a specific file
-  rancher-kubeconfig-proxy generate --url https://rancher.example.com --username admin --password mypassword --output ~/.kube/rancher-config
+  kubeconfig-wrangler generate --url https://rancher.example.com --username admin --password mypassword --output ~/.kube/rancher-config
 
   # Using environment variables
   export RANCHER_URL=https://rancher.example.com
   export RANCHER_USERNAME=admin
   export RANCHER_PASSWORD=mypassword
   export RANCHER_CLUSTER_PREFIX=prod-
-  rancher-kubeconfig-proxy generate`,
+  kubeconfig-wrangler generate`,
 	RunE: runGenerate,
 }
 

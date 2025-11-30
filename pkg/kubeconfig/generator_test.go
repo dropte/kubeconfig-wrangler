@@ -135,7 +135,7 @@ func TestGenerator_ApplyPrefix(t *testing.T) {
 
 		prefixedConfig := g.ApplyPrefix(config, "my-cluster")
 
-		// Check clusters
+		// Check clusters - renamed to use clusterName as base
 		if _, exists := prefixedConfig.Clusters["prod-my-cluster"]; !exists {
 			t.Error("expected prefixed cluster 'prod-my-cluster' to exist")
 		}
@@ -143,7 +143,7 @@ func TestGenerator_ApplyPrefix(t *testing.T) {
 			t.Error("original cluster name should not exist after prefixing")
 		}
 
-		// Check contexts
+		// Check contexts - renamed to use clusterName as base
 		if _, exists := prefixedConfig.Contexts["prod-my-cluster"]; !exists {
 			t.Error("expected prefixed context 'prod-my-cluster' to exist")
 		}
@@ -151,14 +151,15 @@ func TestGenerator_ApplyPrefix(t *testing.T) {
 			t.Errorf("context cluster reference = %q, want %q",
 				prefixedConfig.Contexts["prod-my-cluster"].Cluster, "prod-my-cluster")
 		}
-		if prefixedConfig.Contexts["prod-my-cluster"].AuthInfo != "prod-my-user" {
+		// Auth info is also renamed to use clusterName as base (not original user name)
+		if prefixedConfig.Contexts["prod-my-cluster"].AuthInfo != "prod-my-cluster" {
 			t.Errorf("context auth info reference = %q, want %q",
-				prefixedConfig.Contexts["prod-my-cluster"].AuthInfo, "prod-my-user")
+				prefixedConfig.Contexts["prod-my-cluster"].AuthInfo, "prod-my-cluster")
 		}
 
-		// Check auth infos
-		if _, exists := prefixedConfig.AuthInfos["prod-my-user"]; !exists {
-			t.Error("expected prefixed user 'prod-my-user' to exist")
+		// Check auth infos - renamed to use clusterName as base
+		if _, exists := prefixedConfig.AuthInfos["prod-my-cluster"]; !exists {
+			t.Error("expected prefixed user 'prod-my-cluster' to exist")
 		}
 
 		// Check current context
@@ -187,18 +188,19 @@ func TestGenerator_ApplyPrefix(t *testing.T) {
 
 		prefixedConfig := g.ApplyPrefix(config, "my-cluster")
 
-		// Without prefix, names should remain unchanged
+		// Without prefix, names are still renamed to use clusterName as base
 		if _, exists := prefixedConfig.Clusters["my-cluster"]; !exists {
-			t.Error("cluster name should remain unchanged without prefix")
+			t.Error("cluster name should be 'my-cluster' (clusterName as base)")
 		}
 		if _, exists := prefixedConfig.Contexts["my-cluster"]; !exists {
-			t.Error("context name should remain unchanged without prefix")
+			t.Error("context name should be 'my-cluster' (clusterName as base)")
 		}
-		if _, exists := prefixedConfig.AuthInfos["my-user"]; !exists {
-			t.Error("user name should remain unchanged without prefix")
+		// User name is also renamed to use clusterName as base
+		if _, exists := prefixedConfig.AuthInfos["my-cluster"]; !exists {
+			t.Error("user name should be 'my-cluster' (clusterName as base)")
 		}
 		if prefixedConfig.CurrentContext != "my-cluster" {
-			t.Errorf("current-context should remain unchanged without prefix, got %q", prefixedConfig.CurrentContext)
+			t.Errorf("current-context should be 'my-cluster', got %q", prefixedConfig.CurrentContext)
 		}
 	})
 
@@ -213,8 +215,9 @@ func TestGenerator_ApplyPrefix(t *testing.T) {
 
 		prefixedConfig := g.ApplyPrefix(config, "my-cluster")
 
-		if prefixedConfig.CurrentContext != "" {
-			t.Errorf("current-context should remain empty, got %q", prefixedConfig.CurrentContext)
+		// ApplyPrefix always sets current context to the new name
+		if prefixedConfig.CurrentContext != "test-my-cluster" {
+			t.Errorf("current-context should be 'test-my-cluster', got %q", prefixedConfig.CurrentContext)
 		}
 	})
 }

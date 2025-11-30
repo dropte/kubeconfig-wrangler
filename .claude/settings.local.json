@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat:*)",
+      "Bash(python3:*)",
+      "Bash(ruby -ryaml -e \"YAML.load_file(''.github/workflows/release.yml'')\")",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git fetch:*)",
+      "Bash(gh pr create --base develop --title \"Fix macOS binary signing and notarization in release workflow\" --body \"$(cat <<''EOF''\n## Summary\n\n- Fix `if` condition checks for Apple signing secrets by moving secret-to-env mappings to job level\n- The previous approach checked `env.APPLE_CERTIFICATE` before secrets were mapped to environment variables, causing signing/notarization steps to always be skipped\n- Updates both `build-cli-macos` and `build-electron-macos` jobs\n\n## Changes\n\n- Added job-level `env` blocks that map secrets to environment variables\n- Updated `if` conditions to use `${ env.X != '''' }` syntax (secrets cannot be reliably checked directly in `if` conditions)\n- Removed redundant step-level env blocks\n- Fixed notarization password env var reference (`APPLE_ID_PASSWORD` instead of `APPLE_APP_SPECIFIC_PASSWORD`)\n\n## Test plan\n\n- [ ] Verify secrets are configured in GitHub repository settings\n- [ ] Create a test release tag to trigger the workflow\n- [ ] Confirm signing and notarization steps run (not skipped)\n- [ ] Download macOS binary and verify it opens without Gatekeeper warning\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\nEOF\n)\")",
+      "Bash(gh run list:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh secret:*)",
+      "Bash(gh release:*)",
+      "Bash(ruby -ryaml -e:*)",
+      "Bash(git add:*)",
+      "Bash(git tag:*)",
+      "Bash(GOOS=darwin GOARCH=arm64 go build:*)",
+      "Bash(npm ci:*)",
+      "Bash(npm start)",
+      "Bash(git checkout:*)",
+      "Bash(go get:*)",
+      "Bash(go mod tidy:*)",
+      "Bash(go build:*)",
+      "Bash(rsvg-convert:*)",
+      "Bash(iconutil -c icns:*)",
+      "Bash(gh repo rename:*)",
+      "Bash(npm run build:mac:*)",
+      "Bash(open:*)",
+      "Bash(pkill:*)",
+      "Bash(curl:*)",
+      "Bash(./bin/mac/kubeconfig-wrangler:*)",
+      "Bash(go test:*)",
+      "Bash(kubectl config get-contexts:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

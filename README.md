@@ -1,6 +1,6 @@
-# Rancher Kubeconfig Proxy
+# Kubeconfig Wrangler
 
-A tool that connects to a Rancher instance and generates a merged kubeconfig file containing all downstream Kubernetes clusters managed by that Rancher instance. The generated kubeconfig can be used by any standard Kubernetes tools like `kubectl`, `helm`, `k9s`, and other applications that support kubeconfig files.
+A tool that connects to multiple Kubernetes sources (Rancher, AWS EKS, and more) to generate merged kubeconfig files containing all your Kubernetes clusters. The generated kubeconfig can be used by any standard Kubernetes tools like `kubectl`, `helm`, `k9s`, and other applications that support kubeconfig files.
 
 ## Features
 
@@ -21,14 +21,14 @@ A tool that connects to a Rancher instance and generates a merged kubeconfig fil
 
 ### Pre-built Binaries
 
-Download the latest release from the [Releases](https://github.com/your-org/rancher-kubeconfig-proxy/releases) page.
+Download the latest release from the [Releases](https://github.com/your-org/kubeconfig-wrangler/releases) page.
 
 ### From Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/rancher-kubeconfig-proxy.git
-cd rancher-kubeconfig-proxy
+git clone https://github.com/your-org/kubeconfig-wrangler.git
+cd kubeconfig-wrangler
 
 # Build the CLI
 make build
@@ -52,10 +52,10 @@ To fix this, open Terminal and run:
 
 ```bash
 # If you've already mounted the DMG and copied the app:
-xattr -cr "/Applications/Rancher Kubeconfig Proxy.app"
+xattr -cr "/Applications/Kubeconfig Wrangler.app"
 
 # Or clear the quarantine attribute on the DMG first:
-xattr -cr ~/Downloads/Rancher\ Kubeconfig\ Proxy-*.dmg
+xattr -cr ~/Downloads/Kubeconfig\ Wrangler-*.dmg
 ```
 
 Alternatively, you can right-click the app and select "Open" instead of double-clicking.
@@ -68,31 +68,31 @@ Alternatively, you can right-click the app and select "Open" instead of double-c
 
 ```bash
 # Using API token
-rancher-kubeconfig-proxy generate \
+kubeconfig-wrangler generate \
   --url https://rancher.example.com \
   --token token-xxxxx:yyyyyyyyyyy
 
 # Using username/password
-rancher-kubeconfig-proxy generate \
+kubeconfig-wrangler generate \
   --url https://rancher.example.com \
   --username admin \
   --password mypassword
 
 # With cluster name prefix
-rancher-kubeconfig-proxy generate \
+kubeconfig-wrangler generate \
   --url https://rancher.example.com \
   --token token-xxxxx:yyyyyyyyyyy \
   --prefix "prod-"
 
 # Output to a specific file
-rancher-kubeconfig-proxy generate \
+kubeconfig-wrangler generate \
   --url https://rancher.example.com \
   --username admin \
   --password mypassword \
   --output ~/.kube/rancher-config
 
 # Using access key and secret key separately
-rancher-kubeconfig-proxy generate \
+kubeconfig-wrangler generate \
   --url https://rancher.example.com \
   --access-key token-xxxxx \
   --secret-key yyyyyyyyyyy
@@ -102,12 +102,12 @@ rancher-kubeconfig-proxy generate \
 
 ```bash
 # Using API token
-rancher-kubeconfig-proxy list \
+kubeconfig-wrangler list \
   --url https://rancher.example.com \
   --token token-xxxxx:yyyyyyyyyyy
 
 # Using username/password
-rancher-kubeconfig-proxy list \
+kubeconfig-wrangler list \
   --url https://rancher.example.com \
   --username admin \
   --password mypassword
@@ -116,7 +116,7 @@ rancher-kubeconfig-proxy list \
 #### Start Web GUI
 
 ```bash
-rancher-kubeconfig-proxy serve --port 8080
+kubeconfig-wrangler serve --port 8080
 ```
 
 Then open http://localhost:8080 in your browser.
@@ -145,7 +145,7 @@ export RANCHER_URL=https://rancher.example.com
 export RANCHER_TOKEN=token-xxxxx:yyyyyyyyyyy
 export RANCHER_CLUSTER_PREFIX=prod-
 
-rancher-kubeconfig-proxy generate
+kubeconfig-wrangler generate
 ```
 
 Example using environment variables with username/password:
@@ -156,13 +156,13 @@ export RANCHER_USERNAME=admin
 export RANCHER_PASSWORD=mypassword
 export RANCHER_CLUSTER_PREFIX=prod-
 
-rancher-kubeconfig-proxy generate
+kubeconfig-wrangler generate
 ```
 
 ### Desktop Application
 
 1. Download and install the desktop application for your platform
-2. Launch "Rancher Kubeconfig Proxy"
+2. Launch "Kubeconfig Wrangler"
 3. Enter your Rancher URL
 4. Choose your authentication method:
    - **API Token**: Enter your Rancher API token (format: access_key:secret_key)
@@ -246,7 +246,7 @@ make electron-build-win
 ### Project Structure
 
 ```
-rancher-kubeconfig-proxy/
+kubeconfig-wrangler/
 ├── cmd/                    # CLI commands
 │   ├── root.go            # Root command
 │   ├── generate.go        # Generate command

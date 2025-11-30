@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/rancher-kubeconfig-proxy/pkg/config"
+	"github.com/kubeconfig-wrangler/pkg/config"
 )
 
 // Sample kubeconfig for testing

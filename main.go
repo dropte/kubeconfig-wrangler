@@ -1,6 +1,6 @@
 package main
 
-import "github.com/rancher-kubeconfig-proxy/cmd"
+import "github.com/kubeconfig-wrangler/cmd"
 
 func main() {
 	cmd.Execute()
