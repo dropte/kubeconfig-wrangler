@@ -53,7 +53,7 @@ jobs:
     needs: [lint, test]
     strategy:
       matrix:
-        goos: [linux, darwin, windows]
+        goos: [linux, windows]
         goarch: [amd64, arm64]
         exclude:
           - goos: windows
@@ -84,6 +84,76 @@ jobs:
         with:
           name: kubeconfig-wrangler-${{ matrix.goos }}-${{ matrix.goarch }}
           path: bin/kubeconfig-wrangler-*
+
+  build-cli-macos:
+    name: Build CLI (macOS)
+    runs-on: macos-latest
+    needs: [lint, test]
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Import Code Signing Certificate
+        if: ${{ env.APPLE_CERTIFICATE != '' }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+          echo "SIGNING_IDENTITY=$IDENTITY" >> $GITHUB_ENV
+
+      - name: Build
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p bin
+          go build -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ github.sha }}" \
+            -o bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }} .
+
+      - name: Sign Binary
+        if: ${{ env.SIGNING_IDENTITY != '' }}
+        run: |
+          codesign --force --options runtime --sign "$SIGNING_IDENTITY" \
+            bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }}
+          codesign --verify --verbose bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }}
+
+      - name: Notarize Binary
+        if: ${{ env.APPLE_ID != '' && env.SIGNING_IDENTITY != '' }}
+        run: |
+          cd bin
+          zip kubeconfig-wrangler-darwin-${{ matrix.goarch }}.zip kubeconfig-wrangler-darwin-${{ matrix.goarch }}
+          xcrun notarytool submit kubeconfig-wrangler-darwin-${{ matrix.goarch }}.zip \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait || echo "Notarization failed, continuing..."
+          rm kubeconfig-wrangler-darwin-${{ matrix.goarch }}.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubeconfig-wrangler-darwin-${{ matrix.goarch }}
+          path: bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }}
 
   build-electron:
     name: Build Electron App
