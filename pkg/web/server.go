@@ -589,6 +589,36 @@ func (s *Server) handleProfileByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// markClustersInLocalKubeconfig checks which clusters exist in the local kubeconfig
+// and sets the InLocalKubeconfig field accordingly
+func (s *Server) markClustersInLocalKubeconfig(clusters []provider.ClusterInfo) {
+	localNames, err := s.ctxSwitcher.GetLocalClusterNames()
+	if err != nil {
+		log.Printf("Warning: failed to get local cluster names: %v", err)
+		return
+	}
+
+	for i := range clusters {
+		// Check if the cluster name or alias exactly matches any local cluster/context name
+		if localNames[clusters[i].Name] {
+			clusters[i].InLocalKubeconfig = true
+			continue
+		}
+		if clusters[i].Alias != "" && localNames[clusters[i].Alias] {
+			clusters[i].InLocalKubeconfig = true
+			continue
+		}
+
+		// Check if this cluster was exported (merged) with a tracked context name
+		if s.profileStore != nil && clusters[i].ProfileID != "" {
+			exportedContextName := s.profileStore.GetExportedContext(clusters[i].ProfileID, clusters[i].ID)
+			if exportedContextName != "" && localNames[exportedContextName] {
+				clusters[i].InLocalKubeconfig = true
+			}
+		}
+	}
+}
+
 // handleListClustersForProfile lists clusters for a specific profile
 func (s *Server) handleListClustersForProfile(w http.ResponseWriter, r *http.Request) {
 	log.Printf("handleListClustersForProfile: received request")
@@ -651,6 +681,9 @@ func (s *Server) handleListClustersForProfile(w http.ResponseWriter, r *http.Req
 			}
 		}
 	}
+
+	// Mark clusters that exist in local kubeconfig
+	s.markClustersInLocalKubeconfig(clusters)
 
 	log.Printf("handleListClustersForProfile: found %d clusters", len(clusters))
 	s.writeJSON(w, http.StatusOK, APIResponse{
@@ -757,6 +790,9 @@ func (s *Server) handleListAllClusters(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wg.Wait()
+
+	// Mark clusters that exist in local kubeconfig
+	s.markClustersInLocalKubeconfig(allClusters)
 
 	log.Printf("handleListAllClusters: found %d clusters from %d profiles", len(allClusters), len(allProfiles))
 
@@ -1046,6 +1082,13 @@ func (s *Server) handleContexts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ExportedClusterInfo tracks cluster info for export tracking
+type ExportedClusterInfo struct {
+	ProfileID   string `json:"profileId"`
+	ClusterID   string `json:"clusterId"`
+	ContextName string `json:"contextName"`
+}
+
 // handleContextMerge merges a kubeconfig into the user's kubeconfig
 func (s *Server) handleContextMerge(w http.ResponseWriter, r *http.Request) {
 	log.Printf("handleContextMerge: received request")
@@ -1058,7 +1101,8 @@ func (s *Server) handleContextMerge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Kubeconfig string `json:"kubeconfig"`
+		Kubeconfig string                `json:"kubeconfig"`
+		Clusters   []ExportedClusterInfo `json:"clusters,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("handleContextMerge: failed to decode request: %v", err)
@@ -1075,6 +1119,19 @@ func (s *Server) handleContextMerge(w http.ResponseWriter, r *http.Request) {
 			Error:   fmt.Sprintf("Failed to merge kubeconfig: %v", err),
 		})
 		return
+	}
+
+	// Track exported clusters if profile store is available
+	if s.profileStore != nil && len(req.Clusters) > 0 {
+		for _, cluster := range req.Clusters {
+			if cluster.ProfileID != "" && cluster.ClusterID != "" && cluster.ContextName != "" {
+				if err := s.profileStore.SetExportedContext(cluster.ProfileID, cluster.ClusterID, cluster.ContextName); err != nil {
+					log.Printf("handleContextMerge: failed to track export for cluster %s: %v", cluster.ClusterID, err)
+				} else {
+					log.Printf("handleContextMerge: tracked export %s -> %s", cluster.ClusterID, cluster.ContextName)
+				}
+			}
+		}
 	}
 
 	s.writeJSON(w, http.StatusOK, APIResponse{
@@ -2137,6 +2194,24 @@ const indexHTML = `<!DOCTYPE html>
             background: var(--error);
         }
 
+        /* Local kubeconfig indicator */
+        .local-config-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            padding: 1px 6px;
+            border-radius: 8px;
+            font-size: 10px;
+            font-weight: 500;
+            background: rgba(78, 201, 176, 0.15);
+            color: var(--success);
+            margin-left: 8px;
+        }
+
+        .local-config-badge::before {
+            content: '✓';
+        }
+
         /* Empty State */
         .empty-state {
             display: flex;
@@ -2728,12 +2803,12 @@ const indexHTML = `<!DOCTYPE html>
 
         function isActiveState(state) {
             const s = (state || '').toLowerCase();
-            return s === 'active' || s === 'running' || s === 'ready';
+            return s === 'active' || s === 'running' || s === 'ready' || s === 'static';
         }
 
         function getStatusClass(state) {
             const s = (state || '').toLowerCase();
-            if (s === 'active' || s === 'running' || s === 'ready') return 'status-active';
+            if (s === 'active' || s === 'running' || s === 'ready' || s === 'static') return 'status-active';
             if (s === 'error' || s === 'unavailable' || s === 'failed') return 'status-error';
             return 'status-inactive';
         }
@@ -2761,11 +2836,13 @@ const indexHTML = `<!DOCTYPE html>
                 const isActive = isActiveState(cluster.state);
                 // Display alias if set, otherwise fall back to the original name
                 const displayName = cluster.alias || cluster.name;
+                const localBadge = cluster.inLocalKubeconfig ? '<span class="local-config-badge">local</span>' : '';
                 tr.innerHTML = ` + "`" + `
                     <td><input type="checkbox" id="cluster-${index}" ${isActive ? 'checked' : ''} ${!isActive ? 'disabled' : ''} onchange="onClusterSelect(${index})"></td>
                     <td class="cluster-name-cell">
                         <div class="cluster-name-row">
                             <span class="cluster-display-name">${escapeHtml(displayName)}</span>
+                            ${localBadge}
                             <button class="edit-alias-btn" onclick="showEditAliasModal(${index})" title="Edit name">✏️</button>
                         </div>
                         <div class="cluster-source-name">${escapeHtml(cluster.name)}</div>
@@ -2908,14 +2985,43 @@ const indexHTML = `<!DOCTYPE html>
                 // If merge option is enabled, merge to kubeconfig instead of downloading
                 if (options.mergeToKubeconfig) {
                     const kubeconfigContent = await blob.text();
+
+                    // Build cluster info for export tracking
+                    // The context name is: sourcePrefix (if useSourcePrefix) + clusterPrefix + (alias || name)
+                    const clusterInfo = selectedClusters.map(c => {
+                        let contextName = '';
+                        if (selectedProfileId === '__all__' && options.useSourcePrefix) {
+                            // Find the profile name for this cluster
+                            const profile = profiles.find(p => p.id === c.profileId);
+                            if (profile) {
+                                contextName = profile.name.toLowerCase().replace(/[^a-z0-9]/g, '-') + '-';
+                            }
+                        }
+                        contextName += options.prefix + (c.alias || c.name);
+                        return {
+                            profileId: c.profileId || selectedProfileId,
+                            clusterId: c.id,
+                            contextName: contextName
+                        };
+                    });
+
                     const mergeResponse = await authFetch('/api/context/merge', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ kubeconfig: kubeconfigContent })
+                        body: JSON.stringify({
+                            kubeconfig: kubeconfigContent,
+                            clusters: clusterInfo
+                        })
                     });
                     const mergeResult = await mergeResponse.json();
                     if (mergeResult.success) {
                         showToast('Contexts merged into ~/.kube/config successfully!', 'success');
+                        // Refresh cluster list to show updated badges
+                        if (selectedProfileId === '__all__') {
+                            loadAllClusters();
+                        } else {
+                            loadClustersForProfile(selectedProfileId);
+                        }
                     } else {
                         showToast('Failed to merge: ' + mergeResult.error, 'error');
                     }
