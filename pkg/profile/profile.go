@@ -79,6 +79,10 @@ type Profile struct {
 	// ClusterAliases maps cluster IDs to user-defined friendly names
 	// The alias is used instead of the original cluster name in generated kubeconfigs
 	ClusterAliases map[string]string `json:"clusterAliases,omitempty"`
+
+	// ExportedContexts maps cluster IDs to the context name used when merging to ~/.kube/config
+	// This tracks which clusters have been exported and with what context name
+	ExportedContexts map[string]string `json:"exportedContexts,omitempty"`
 }
 
 // IsRancher returns true if this is a Rancher profile
