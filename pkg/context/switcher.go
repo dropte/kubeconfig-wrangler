@@ -318,3 +318,31 @@ func (s *Switcher) Exists() bool {
 	_, err := os.Stat(s.kubeconfigPath)
 	return err == nil
 }
+
+// GetLocalClusterNames returns a set of all cluster names and context names from the local kubeconfig.
+// This is useful for checking if a cluster already exists in the local config.
+// Returns both cluster names (from the clusters section) and context names to maximize match chances.
+func (s *Switcher) GetLocalClusterNames() (map[string]bool, error) {
+	names := make(map[string]bool)
+
+	cfg, err := s.loadConfig()
+	if err != nil {
+		// If kubeconfig doesn't exist, return empty set
+		if os.IsNotExist(err) {
+			return names, nil
+		}
+		return names, err
+	}
+
+	// Add all cluster names
+	for clusterName := range cfg.Clusters {
+		names[clusterName] = true
+	}
+
+	// Add all context names (sometimes context name matches cluster better than cluster name)
+	for contextName := range cfg.Contexts {
+		names[contextName] = true
+	}
+
+	return names, nil
+}

@@ -317,3 +317,59 @@ func (s *Store) GetClusterAlias(profileID, clusterID string) string {
 
 	return profile.ClusterAliases[clusterID]
 }
+
+// SetExportedContext records that a cluster was merged to kubeconfig with the given context name
+func (s *Store) SetExportedContext(profileID, clusterID, contextName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	profile, exists := s.profiles[profileID]
+	if !exists {
+		return fmt.Errorf("profile not found: %s", profileID)
+	}
+
+	if profile.ExportedContexts == nil {
+		profile.ExportedContexts = make(map[string]string)
+	}
+
+	if contextName == "" {
+		delete(profile.ExportedContexts, clusterID)
+	} else {
+		profile.ExportedContexts[clusterID] = contextName
+	}
+
+	profile.UpdatedAt = time.Now()
+
+	return s.save()
+}
+
+// GetExportedContext returns the exported context name for a cluster, or empty string if not exported
+func (s *Store) GetExportedContext(profileID, clusterID string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	profile, exists := s.profiles[profileID]
+	if !exists || profile.ExportedContexts == nil {
+		return ""
+	}
+
+	return profile.ExportedContexts[clusterID]
+}
+
+// GetAllExportedContexts returns all exported context names across all profiles
+func (s *Store) GetAllExportedContexts() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make(map[string]string)
+	for _, profile := range s.profiles {
+		if profile.ExportedContexts != nil {
+			for clusterID, contextName := range profile.ExportedContexts {
+				// Key by profileID:clusterID to avoid collisions
+				key := profile.ID + ":" + clusterID
+				result[key] = contextName
+			}
+		}
+	}
+	return result
+}

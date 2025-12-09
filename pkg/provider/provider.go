@@ -29,6 +29,9 @@ type ClusterInfo struct {
 
 	// Alias is a user-defined friendly name for this cluster (used in generated kubeconfigs)
 	Alias string `json:"alias,omitempty"`
+
+	// InLocalKubeconfig indicates whether this cluster already exists in the user's ~/.kube/config
+	InLocalKubeconfig bool `json:"inLocalKubeconfig"`
 }
 
 // ClusterProvider is the interface that all cluster providers must implement
