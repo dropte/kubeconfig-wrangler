@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, powerMonitor, Menu } = require('electron');
 const path = require('path');
+const http = require('http');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const net = require('net');
@@ -9,19 +10,48 @@ const { autoUpdater } = require('electron-updater');
 // Set app name for development
 app.setName('Kubeconfig Wrangler');
 
-let mainWindow;
-let backendProcess;
+let mainWindow = null;
+let backendProcess = null;
 let serverPort = 18080;
 let serverToken = '';
 let isQuitting = false;
 let healthCheckInterval = null;
+let healthCheckInFlight = false;
+let restartPromise = null;
 let restartAttempts = 0;
+let gaveUpRestarting = false;
+let loadRetries = 0;
+let interactiveUpdateCheck = false;
+
+// Every spawned backend child, so stopBackend() can kill stragglers too.
+const backendChildren = new Set();
+
 const MAX_RESTART_ATTEMPTS = 3;
+const MAX_LOAD_RETRIES = 5;
 const HEALTH_CHECK_INTERVAL = 5000; // 5 seconds
+const READY_POLL_INTERVAL = 250;
+const READY_TIMEOUT = 10000;
 
 // Generate a cryptographically secure random token
 function generateSecurityToken() {
   return crypto.randomBytes(32).toString('hex');
+}
+
+function backendOrigin() {
+  return `http://127.0.0.1:${serverPort}`;
+}
+
+// URL the window loads; "/" is only served to requests carrying the token.
+function appURL() {
+  return `${backendOrigin()}/?token=${serverToken}`;
+}
+
+function isBackendURL(url) {
+  try {
+    return new URL(url).origin === backendOrigin();
+  } catch {
+    return false;
+  }
 }
 
 // Find an available port
@@ -66,8 +96,23 @@ function getBackendPath() {
   }
 }
 
-// Start the Go backend server
+// Kill a backend child we no longer want; its 'close' handler will not
+// treat the resulting exit as a crash.
+function killChild(child, signal) {
+  child.expectedExit = true;
+  try {
+    child.kill(signal);
+  } catch (e) {
+    // Ignore errors killing the process
+  }
+}
+
+// Start the Go backend server. Resolves true once the server answers.
 async function startBackend() {
+  if (backendProcess && await checkBackendHealth()) {
+    return true;
+  }
+
   const backendPath = getBackendPath();
 
   // Check if the backend binary exists
@@ -81,6 +126,11 @@ async function startBackend() {
     return false;
   }
 
+  if (backendProcess) {
+    killChild(backendProcess, 'SIGKILL');
+    backendProcess = null;
+  }
+
   // Find an available port
   serverPort = await findAvailablePort(18080);
 
@@ -89,77 +139,137 @@ async function startBackend() {
 
   console.log('Starting backend server on port', serverPort);
   console.log('Backend path:', backendPath);
-  console.log('Security token enabled');
+
+  // The token goes through the environment, not argv, so it is not visible in ps.
+  const child = spawn(backendPath, ['serve', '--port', serverPort.toString(), '--addr', '127.0.0.1'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, KUBECONFIG_WRANGLER_TOKEN: serverToken }
+  });
+  backendProcess = child;
+  backendChildren.add(child);
+
+  child.on('close', (code, signal) => {
+    backendChildren.delete(child);
+    if (child !== backendProcess || child.expectedExit) {
+      return;
+    }
+    console.log('Backend process exited unexpectedly with', code ?? signal);
+    backendProcess = null;
+    if (!isQuitting) {
+      restartBackend();
+    }
+  });
 
   return new Promise((resolve) => {
-    backendProcess = spawn(backendPath, ['serve', '--port', serverPort.toString(), '--addr', '127.0.0.1', '--token', serverToken], {
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
+    let settled = false;
+    let pollTimer = null;
+    let deadline = null;
 
-    backendProcess.stdout.on('data', (data) => {
-      console.log('Backend:', data.toString());
-      // Check if server is ready
-      if (data.toString().includes('Starting web server')) {
-        setTimeout(() => resolve(true), 500); // Give it a moment to fully start
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(pollTimer);
+      clearTimeout(deadline);
+      child.removeListener('exit', onExit);
+      child.removeListener('error', onError);
+      if (!ok) {
+        // A failed start is reported to the caller; the exit is not a crash to restart from.
+        child.expectedExit = true;
+        if (child.exitCode === null && child.signalCode === null) {
+          killChild(child, 'SIGKILL');
+        }
+        if (backendProcess === child) backendProcess = null;
       }
-    });
+      resolve(ok);
+    };
 
-    backendProcess.stderr.on('data', (data) => {
-      console.error('Backend error:', data.toString());
-    });
-
-    backendProcess.on('error', (error) => {
+    const onLog = (stream) => (data) => {
+      const text = data.toString();
+      if (stream === 'stdout') {
+        console.log('Backend:', text);
+      } else {
+        console.error('Backend:', text);
+      }
+      // The Go server logs 'Listening on <addr>' once the port is bound
+      // (older builds logged 'Starting web server').
+      if (text.includes('Listening on') || text.includes('Starting web server')) {
+        finish(true);
+      }
+    };
+    const onExit = (code, signal) => {
+      console.error('Backend exited before becoming ready:', code ?? signal);
+      finish(false);
+    };
+    const onError = (error) => {
       console.error('Failed to start backend:', error);
-      resolve(false);
-    });
+      finish(false);
+    };
 
-    backendProcess.on('close', (code) => {
-      console.log('Backend process exited with code', code);
-      backendProcess = null;
+    child.stdout.on('data', onLog('stdout'));
+    child.stderr.on('data', onLog('stderr'));
+    child.once('exit', onExit);
+    child.once('error', onError);
 
-      // Auto-restart if not quitting
-      if (!isQuitting && code !== 0) {
-        console.log('Backend crashed unexpectedly, will attempt restart...');
-        restartBackend();
-      }
-    });
+    let probing = false;
+    pollTimer = setInterval(async () => {
+      if (probing || settled) return;
+      probing = true;
+      const ok = await checkBackendHealth();
+      probing = false;
+      if (ok) finish(true);
+    }, READY_POLL_INTERVAL);
 
-    // Timeout in case the server doesn't output the expected message
-    setTimeout(() => resolve(true), 3000);
+    deadline = setTimeout(() => {
+      console.error('Backend did not become ready within', READY_TIMEOUT, 'ms');
+      finish(false);
+    }, READY_TIMEOUT);
   });
 }
 
-// Stop the backend server
+// Stop the backend server (and any other children we spawned)
 function stopBackend() {
   stopHealthCheck();
-  if (backendProcess) {
+  if (backendChildren.size > 0) {
     console.log('Stopping backend server...');
-    backendProcess.kill();
-    backendProcess = null;
   }
+  for (const child of backendChildren) {
+    killChild(child);
+  }
+  backendProcess = null;
 }
 
-// Health check function
-async function checkBackendHealth() {
+function probe(pathname) {
   return new Promise((resolve) => {
-    const http = require('http');
     const req = http.request({
       hostname: '127.0.0.1',
       port: serverPort,
-      path: '/',
+      path: pathname,
       method: 'GET',
+      headers: { 'X-Auth-Token': serverToken },
       timeout: 3000
     }, (res) => {
-      resolve(res.statusCode === 200);
+      res.resume();
+      resolve(res.statusCode);
     });
 
-    req.on('error', () => resolve(false));
+    req.on('error', () => resolve(0));
     req.on('timeout', () => {
       req.destroy();
-      resolve(false);
+      resolve(0);
     });
     req.end();
   });
+}
+
+// Health check: authenticated GET /api/status. A server that does not know
+// our token (401/403) is not our backend and counts as unhealthy.
+async function checkBackendHealth() {
+  const status = await probe('/api/status');
+  if (status === 404) {
+    // Older backend without /api/status: the token-gated index page works too.
+    return (await probe('/')) === 200;
+  }
+  return status === 200;
 }
 
 // Start health check monitoring
@@ -167,30 +277,27 @@ function startHealthCheck() {
   stopHealthCheck();
 
   healthCheckInterval = setInterval(async () => {
-    if (isQuitting || !backendProcess) return;
-
-    const isHealthy = await checkBackendHealth();
-
-    if (!isHealthy) {
-      console.log('Backend health check failed');
-
-      // Check if the process is actually running
+    if (isQuitting || healthCheckInFlight || restartPromise) return;
+    healthCheckInFlight = true;
+    try {
       if (!backendProcess) {
         console.log('Backend process not running, attempting restart...');
         await restartBackend();
-      } else {
-        // Process is running but not responding - might be hung
-        console.log('Backend process running but not responding');
-        // Give it one more chance
-        const secondCheck = await checkBackendHealth();
-        if (!secondCheck) {
-          console.log('Backend still not responding, restarting...');
-          await restartBackend();
-        }
+        return;
       }
-    } else {
-      // Reset restart attempts on successful health check
-      restartAttempts = 0;
+
+      if (await checkBackendHealth()) {
+        restartAttempts = 0;
+        return;
+      }
+
+      console.log('Backend health check failed, checking once more...');
+      if (!(await checkBackendHealth())) {
+        console.log('Backend still not responding, restarting...');
+        await restartBackend();
+      }
+    } finally {
+      healthCheckInFlight = false;
     }
   }, HEALTH_CHECK_INTERVAL);
 }
@@ -203,12 +310,22 @@ function stopHealthCheck() {
   }
 }
 
-// Restart backend with retry logic
-async function restartBackend() {
-  if (isQuitting) return false;
+// Restart backend with retry logic. Concurrent callers share one restart.
+function restartBackend() {
+  if (restartPromise) return restartPromise;
+  restartPromise = doRestartBackend().finally(() => {
+    restartPromise = null;
+  });
+  return restartPromise;
+}
+
+async function doRestartBackend() {
+  if (isQuitting || gaveUpRestarting) return false;
 
   if (restartAttempts >= MAX_RESTART_ATTEMPTS) {
     console.error('Max restart attempts reached, giving up');
+    gaveUpRestarting = true;
+    stopHealthCheck();
     dialog.showErrorBox(
       'Backend Error',
       'The backend server has crashed multiple times and cannot be restarted. Please restart the application.'
@@ -221,25 +338,57 @@ async function restartBackend() {
 
   // Kill the existing process if it's still around
   if (backendProcess) {
-    try {
-      backendProcess.kill('SIGKILL');
-    } catch (e) {
-      // Ignore errors killing the process
-    }
+    killChild(backendProcess, 'SIGKILL');
     backendProcess = null;
   }
 
   // Wait a moment before restarting
   await new Promise(resolve => setTimeout(resolve, 1000));
+  if (isQuitting) return false;
 
   const success = await startBackend();
 
   if (success && mainWindow && !mainWindow.isDestroyed()) {
     console.log('Backend restarted successfully, reloading window...');
-    mainWindow.loadURL(`http://127.0.0.1:${serverPort}`);
+    loadRetries = 0;
+    mainWindow.loadURL(appURL());
   }
 
   return success;
+}
+
+// Bring the backend back after it was stopped or gave up (e.g. macOS Dock reopen).
+async function ensureBackend() {
+  if (backendProcess || isQuitting) return true;
+  restartAttempts = 0;
+  gaveUpRestarting = false;
+  const ok = await restartBackend();
+  // Keep monitoring even when this restart failed: each tick retries while
+  // backendProcess is null, until MAX_RESTART_ATTEMPTS gives up with a dialog.
+  if (!gaveUpRestarting && !isQuitting) startHealthCheck();
+  return ok;
+}
+
+// macOS Dock reopen: bring the backend back if needed, then reopen the window.
+// A window pointed at a dead backend would only show a blank page, so tell the
+// user instead (the health check keeps retrying in the background).
+async function onActivate() {
+  if (BrowserWindow.getAllWindows().length > 0 || isQuitting) return;
+  if (!backendProcess) {
+    const ok = await ensureBackend();
+    if (!ok) {
+      if (!isQuitting) {
+        dialog.showErrorBox(
+          'Backend Error',
+          'The backend server could not be started. Please try again or restart the application.'
+        );
+      }
+      return;
+    }
+  }
+  if (!mainWindow && !isQuitting) {
+    createWindow();
+  }
 }
 
 // Create the main window
@@ -252,6 +401,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
       preload: path.join(__dirname, 'preload.js')
     },
     icon: path.join(__dirname, 'build', 'icon.png'),
@@ -259,8 +409,9 @@ function createWindow() {
     show: false // Don't show until ready
   });
 
+  loadRetries = 0;
   // Load the web interface from the backend server
-  mainWindow.loadURL(`http://127.0.0.1:${serverPort}`);
+  mainWindow.loadURL(appURL());
 
   // Show window when ready
   mainWindow.once('ready-to-show', () => {
@@ -272,20 +423,48 @@ function createWindow() {
     mainWindow = null;
   });
 
-  // Open external links in the default browser
+  // Open external web links in the default browser; never hand other
+  // schemes (file:, smb:, custom protocol handlers) to the OS.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    try {
+      const { protocol } = new URL(url);
+      if (protocol === 'https:' || protocol === 'http:') {
+        shell.openExternal(url);
+      }
+    } catch {
+      // Invalid URL: deny
+    }
     return { action: 'deny' };
   });
 
-  // Handle page load failures (e.g., after sleep/resume)
-  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+  // Keep the window on the backend origin.
+  const blockForeignNavigation = (event, url) => {
+    if (!isBackendURL(url)) {
+      console.warn('Blocked navigation to', url);
+      event.preventDefault();
+    }
+  };
+  mainWindow.webContents.on('will-navigate', blockForeignNavigation);
+  mainWindow.webContents.on('will-redirect', blockForeignNavigation);
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    loadRetries = 0;
+  });
+
+  // Handle page load failures (e.g., after sleep/resume), with a bounded retry.
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     console.log('Page failed to load:', errorCode, errorDescription);
-    // Retry loading after a short delay
+    // -3 (ERR_ABORTED) means another navigation replaced this one.
+    if (!isMainFrame || errorCode === -3 || isQuitting) return;
+    if (loadRetries >= MAX_LOAD_RETRIES) {
+      console.error('Giving up reloading the page after', MAX_LOAD_RETRIES, 'attempts');
+      return;
+    }
+    loadRetries++;
     setTimeout(() => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        console.log('Retrying page load...');
-        mainWindow.loadURL(`http://127.0.0.1:${serverPort}`);
+      if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) {
+        console.log(`Retrying page load (${loadRetries}/${MAX_LOAD_RETRIES})...`);
+        mainWindow.loadURL(appURL());
       }
     }, 1000);
   });
@@ -307,53 +486,58 @@ function createWindow() {
   });
 }
 
-// IPC handlers for save dialog
-ipcMain.handle('show-save-dialog', async (event, options) => {
-  const result = await dialog.showSaveDialog(mainWindow, {
-    title: 'Save Kubeconfig',
-    defaultPath: options.defaultPath || 'kubeconfig.yaml',
-    filters: [
-      { name: 'YAML Files', extensions: ['yaml', 'yml'] },
-      { name: 'All Files', extensions: ['*'] }
-    ]
+// Register an IPC handler that only answers frames served by our backend.
+function handleTrusted(channel, handler) {
+  ipcMain.handle(channel, (event, ...args) => {
+    const frameURL = event.senderFrame ? event.senderFrame.url : '';
+    if (!isBackendURL(frameURL)) {
+      console.warn(`Rejected IPC "${channel}" from`, frameURL || 'unknown frame');
+      throw new Error('Unauthorized IPC sender');
+    }
+    return handler(event, ...args);
   });
-  return result;
-});
+}
 
-ipcMain.handle('save-file', async (event, { filePath, content }) => {
-  try {
-    fs.writeFileSync(filePath, content);
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-// IPC handlers for open dialog (file loading)
-ipcMain.handle('show-open-dialog', async (event, options) => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: options.title || 'Open File',
-    defaultPath: options.defaultPath,
-    filters: options.filters || [
+// Open a kubeconfig via a native dialog and return its content. The renderer
+// never supplies a path, so it cannot read arbitrary files.
+handleTrusted('open-kubeconfig-file', async () => {
+  const options = {
+    title: 'Select Kubeconfig File',
+    filters: [
       { name: 'YAML Files', extensions: ['yaml', 'yml'] },
       { name: 'All Files', extensions: ['*'] }
     ],
     properties: ['openFile']
-  });
-  return result;
+  };
+  const result = mainWindow && !mainWindow.isDestroyed()
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options);
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return { canceled: true, content: '', error: '' };
+  }
+  try {
+    const content = await fs.promises.readFile(result.filePaths[0], 'utf8');
+    return { canceled: false, content, error: '' };
+  } catch (error) {
+    return { canceled: false, content: '', error: error.message };
+  }
 });
 
-ipcMain.handle('read-file', async (event, { filePath }) => {
-  try {
-    const content = fs.readFileSync(filePath, 'utf8');
-    return { success: true, content };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
+// Manual update check
+handleTrusted('check-for-updates', async () => {
+  checkForUpdates(false);
+});
+
+// Current version
+handleTrusted('get-app-version', () => {
+  return app.getVersion();
 });
 
 // App lifecycle events
 app.whenReady().then(async () => {
+  createAppMenu();
+
   // Set dock icon on macOS (for development)
   if (process.platform === 'darwin' && app.dock) {
     const iconPath = path.join(__dirname, 'build', 'icon.png');
@@ -362,6 +546,8 @@ app.whenReady().then(async () => {
       app.dock.setIcon(icon);
     }
   }
+
+  registerPowerHandlers();
 
   const backendStarted = await startBackend();
 
@@ -379,16 +565,17 @@ app.whenReady().then(async () => {
 
   createWindow();
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
-  });
+  app.on('activate', onActivate);
+
+  // Check for updates silently on startup (after a short delay)
+  setTimeout(() => {
+    checkForUpdates(true);
+  }, 5000);
 });
 
+// On macOS the app (and its backend) stays alive without windows;
+// before-quit/will-quit stop the backend on a real quit.
 app.on('window-all-closed', () => {
-  isQuitting = true;
-  stopBackend();
   if (process.platform !== 'darwin') {
     app.quit();
   }
@@ -404,40 +591,46 @@ app.on('will-quit', () => {
   stopBackend();
 });
 
-// Handle system power events
-powerMonitor.on('resume', async () => {
-  console.log('System resumed from sleep');
-  // Give the network a moment to reconnect
-  await new Promise(resolve => setTimeout(resolve, 1500));
+// Handle system power events (powerMonitor is only usable once the app is ready)
+function registerPowerHandlers() {
+  powerMonitor.on('resume', async () => {
+    console.log('System resumed from sleep');
+    // Give the network a moment to reconnect
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    if (isQuitting) return;
 
-  // Check backend health and restart if needed
-  const isHealthy = await checkBackendHealth();
-  if (!isHealthy) {
-    console.log('Backend not responding after resume, restarting...');
-    await restartBackend();
-  } else if (mainWindow && !mainWindow.isDestroyed()) {
-    console.log('Backend healthy, reloading window after resume...');
-    mainWindow.reload();
-  }
-});
+    // Check backend health and restart if needed
+    const isHealthy = await checkBackendHealth();
+    if (!isHealthy) {
+      console.log('Backend not responding after resume, restarting...');
+      await restartBackend();
+    } else if (mainWindow && !mainWindow.isDestroyed()) {
+      console.log('Backend healthy, reloading window after resume...');
+      loadRetries = 0;
+      mainWindow.loadURL(appURL());
+    }
+  });
 
-powerMonitor.on('unlock-screen', () => {
-  console.log('Screen unlocked');
-  // Check if page needs reload by trying to reload if blank
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.executeJavaScript('document.body.innerHTML.length')
-      .then(length => {
-        if (length === 0) {
-          console.log('Page appears blank, reloading...');
-          mainWindow.reload();
-        }
-      })
-      .catch(() => {
-        console.log('Could not check page content, reloading...');
-        mainWindow.reload();
-      });
-  }
-});
+  powerMonitor.on('unlock-screen', () => {
+    console.log('Screen unlocked');
+    // Check if page needs reload by trying to reload if blank
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.executeJavaScript('document.body.innerHTML.length')
+        .then(length => {
+          if (length === 0) {
+            console.log('Page appears blank, reloading...');
+            mainWindow.loadURL(appURL());
+          }
+        })
+        .catch(() => {
+          console.log('Could not check page content, reloading...');
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.loadURL(appURL());
+          }
+        });
+    }
+  });
+}
 
 // ============================================
 // Auto-updater configuration and event handlers
@@ -446,6 +639,12 @@ powerMonitor.on('unlock-screen', () => {
 // Configure auto-updater
 autoUpdater.autoDownload = false; // Don't download automatically, let user decide
 autoUpdater.autoInstallOnAppQuit = true;
+
+// electron-updater can only update AppImage installs on Linux; deb/rpm
+// installs are updated by the package manager.
+function updatesSupported() {
+  return process.platform !== 'linux' || Boolean(process.env.APPIMAGE);
+}
 
 // Auto-updater event handlers
 autoUpdater.on('checking-for-update', () => {
@@ -465,18 +664,36 @@ autoUpdater.on('update-available', (info) => {
     cancelId: 1
   }).then(({ response }) => {
     if (response === 0) {
-      autoUpdater.downloadUpdate();
+      // The user asked for the download, so report its failures.
+      interactiveUpdateCheck = true;
+      autoUpdater.downloadUpdate().catch(() => {
+        // Reported through the 'error' event
+      });
+    } else {
+      interactiveUpdateCheck = false;
     }
   });
 });
 
 autoUpdater.on('update-not-available', (info) => {
   console.log('No update available, current version:', info.version);
+  if (interactiveUpdateCheck) {
+    interactiveUpdateCheck = false;
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'No Updates',
+      message: `You are running the latest version (${app.getVersion()}).`
+    });
+  }
 });
 
 autoUpdater.on('error', (err) => {
   console.error('Auto-updater error:', err);
-  dialog.showErrorBox('Update Error', `Failed to update: ${err.message}`);
+  // Silent startup checks (offline, proxy, rate limit) only log.
+  if (interactiveUpdateCheck) {
+    interactiveUpdateCheck = false;
+    dialog.showErrorBox('Update Error', `Failed to update: ${err.message}`);
+  }
 });
 
 autoUpdater.on('download-progress', (progressObj) => {
@@ -491,6 +708,7 @@ autoUpdater.on('download-progress', (progressObj) => {
 
 autoUpdater.on('update-downloaded', (info) => {
   console.log('Update downloaded:', info.version);
+  interactiveUpdateCheck = false;
 
   // Reset window title
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -507,41 +725,37 @@ autoUpdater.on('update-downloaded', (info) => {
     cancelId: 1
   }).then(({ response }) => {
     if (response === 0) {
+      isQuitting = true;
       stopBackend();
       autoUpdater.quitAndInstall();
     }
   });
 });
 
-// Check for updates function
+// Check for updates. silent=true is the automatic startup check, which never
+// shows dialogs; silent=false is a user-initiated check.
 function checkForUpdates(silent = false) {
-  if (app.isPackaged) {
-    autoUpdater.checkForUpdates().catch(err => {
-      if (!silent) {
-        console.error('Failed to check for updates:', err);
-      }
-    });
-  } else {
-    console.log('Skipping update check in development mode');
+  if (!app.isPackaged || !updatesSupported()) {
+    const reason = app.isPackaged
+      ? 'Automatic updates are only available for the AppImage build. Please update using your package manager.'
+      : 'Update checking is disabled in development mode.';
+    console.log('Skipping update check:', reason);
     if (!silent) {
       dialog.showMessageBox(mainWindow, {
         type: 'info',
-        title: 'Development Mode',
-        message: 'Update checking is disabled in development mode.'
+        title: 'Updates Unavailable',
+        message: reason
       });
     }
+    return;
   }
+
+  interactiveUpdateCheck = !silent;
+  autoUpdater.checkForUpdates().catch(err => {
+    // Failures are reported through the 'error' event.
+    console.error('Failed to check for updates:', err.message);
+  });
 }
-
-// IPC handler for manual update check
-ipcMain.handle('check-for-updates', async () => {
-  checkForUpdates(false);
-});
-
-// IPC handler to get current version
-ipcMain.handle('get-app-version', () => {
-  return app.getVersion();
-});
 
 // Create application menu with update option
 function createAppMenu() {
@@ -638,12 +852,9 @@ function createAppMenu() {
   Menu.setApplicationMenu(menu);
 }
 
-// Initialize menu when app is ready (add to existing whenReady)
-app.whenReady().then(() => {
-  createAppMenu();
-
-  // Check for updates silently on startup (after a short delay)
-  setTimeout(() => {
-    checkForUpdates(true);
-  }, 5000);
-});
+// Exposed for unit tests (test/*.test.js); Electron ignores main-module exports.
+module.exports = {
+  ensureBackend,
+  onActivate,
+  isHealthCheckRunning: () => healthCheckInterval !== null
+};

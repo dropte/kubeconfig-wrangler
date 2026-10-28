@@ -1,8 +1,14 @@
 package kubeconfig
 
 import (
+	"bytes"
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"k8s.io/client-go/tools/clientcmd/api"
 )
@@ -215,9 +221,14 @@ func TestGenerator_ApplyPrefix(t *testing.T) {
 
 		prefixedConfig := g.ApplyPrefix(config, "my-cluster")
 
-		// ApplyPrefix always sets current context to the new name
-		if prefixedConfig.CurrentContext != "test-my-cluster" {
-			t.Errorf("current-context should be 'test-my-cluster', got %q", prefixedConfig.CurrentContext)
+		// With no contexts there is nothing to point current-context at; the
+		// old behaviour left a dangling "test-my-cluster" here.
+		if prefixedConfig.CurrentContext != "" {
+			t.Errorf("current-context should be empty without contexts, got %q", prefixedConfig.CurrentContext)
+		}
+		// The unreferenced cluster is kept under a derived name.
+		if _, ok := prefixedConfig.Clusters["test-my-cluster-my-cluster"]; !ok {
+			t.Errorf("unreferenced cluster not kept, clusters = %v", prefixedConfig.Clusters)
 		}
 	})
 }
@@ -436,4 +447,315 @@ func TestGenerator_Generate(t *testing.T) {
 			t.Errorf("expected 1 cluster, got %d", len(parsed.Clusters))
 		}
 	})
+}
+
+// aceKubeconfig mimics Rancher's generateKubeconfig output for a cluster with
+// the authorized cluster endpoint: the Rancher-proxied context (current) plus
+// one direct context per control-plane node, all sharing one user.
+const aceKubeconfig = `apiVersion: v1
+kind: Config
+clusters:
+- name: prod
+  cluster:
+    server: https://rancher.example.com/k8s/clusters/c-abc
+- name: prod-cp1
+  cluster:
+    server: https://10.0.0.1:6443
+- name: prod-cp2
+  cluster:
+    server: https://10.0.0.2:6443
+users:
+- name: prod
+  user:
+    token: kubeconfig-u-abc:secret
+contexts:
+- name: prod
+  context:
+    cluster: prod
+    user: prod
+- name: prod-cp1
+  context:
+    cluster: prod-cp1
+    user: prod
+- name: prod-cp2
+  context:
+    cluster: prod-cp2
+    user: prod
+current-context: prod
+`
+
+func serverOf(t *testing.T, cfg *api.Config, ctxName string) string {
+	t.Helper()
+	ctx, ok := cfg.Contexts[ctxName]
+	if !ok {
+		t.Fatalf("context %q missing; have %v", ctxName, sortedKeys(cfg.Contexts))
+	}
+	cl, ok := cfg.Clusters[ctx.Cluster]
+	if !ok {
+		t.Fatalf("context %q references missing cluster %q", ctxName, ctx.Cluster)
+	}
+	if _, ok := cfg.AuthInfos[ctx.AuthInfo]; !ok {
+		t.Fatalf("context %q references missing user %q", ctxName, ctx.AuthInfo)
+	}
+	return cl.Server
+}
+
+func TestGenerate_ACEDeterministicAndNamePreserving(t *testing.T) {
+	g := NewGenerator("x-")
+	in := map[string]string{"prod": aceKubeconfig}
+
+	first, err := g.Generate(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100; i++ {
+		out, err := g.Generate(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(out, first) {
+			t.Fatalf("run %d produced different output:\n%s\nvs\n%s", i, out, first)
+		}
+	}
+
+	cfg, err := clientcmd.Load(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"x-prod":     "https://rancher.example.com/k8s/clusters/c-abc",
+		"x-prod-cp1": "https://10.0.0.1:6443",
+		"x-prod-cp2": "https://10.0.0.2:6443",
+	}
+	if len(cfg.Contexts) != len(want) {
+		t.Fatalf("contexts = %v, want %v", sortedKeys(cfg.Contexts), want)
+	}
+	for name, server := range want {
+		if got := serverOf(t, cfg, name); got != server {
+			t.Errorf("context %s -> %s, want %s", name, got, server)
+		}
+		if cfg.Contexts[name].AuthInfo != "x-prod" {
+			t.Errorf("context %s user = %q, want x-prod", name, cfg.Contexts[name].AuthInfo)
+		}
+	}
+	if cfg.CurrentContext != "x-prod" {
+		t.Errorf("current-context = %q, want x-prod", cfg.CurrentContext)
+	}
+}
+
+func TestApplyPrefix_BaseContextWithoutCurrentContext(t *testing.T) {
+	g := NewGenerator("")
+	cfg := &api.Config{
+		Clusters: map[string]*api.Cluster{
+			"b-cluster": {Server: "https://b"},
+			"a-cluster": {Server: "https://a"},
+		},
+		AuthInfos: map[string]*api.AuthInfo{"u": {Token: "t"}},
+		Contexts: map[string]*api.Context{
+			"zeta":  {Cluster: "b-cluster", AuthInfo: "u"},
+			"alpha": {Cluster: "a-cluster", AuthInfo: "u"},
+		},
+		CurrentContext: "does-not-exist",
+	}
+	for i := 0; i < 20; i++ {
+		out := g.ApplyPrefix(cfg, "c")
+		if out.CurrentContext != "c" {
+			t.Fatalf("current-context = %q", out.CurrentContext)
+		}
+		if got := serverOf(t, out, "c"); got != "https://a" {
+			t.Fatalf("base context server = %s, want https://a (smallest context name)", got)
+		}
+		if got := serverOf(t, out, "c-zeta"); got != "https://b" {
+			t.Fatalf("c-zeta server = %s, want https://b", got)
+		}
+	}
+}
+
+func TestApplyPrefix_StripsOnlyAtSeparator(t *testing.T) {
+	g := NewGenerator("")
+	cfg := &api.Config{
+		Clusters: map[string]*api.Cluster{"prod": {}, "production": {}},
+		Contexts: map[string]*api.Context{
+			"prod":       {Cluster: "prod"},
+			"production": {Cluster: "production"},
+		},
+		CurrentContext: "prod",
+	}
+	out := g.ApplyPrefix(cfg, "k")
+	if _, ok := out.Contexts["k-production"]; !ok {
+		t.Errorf("contexts = %v, want k-production", sortedKeys(out.Contexts))
+	}
+}
+
+func TestMergeConfigs_CollisionsNeverOverwrite(t *testing.T) {
+	// Source "prod" derives "prod-cp1"; another source is literally named
+	// "prod-cp1". Neither may overwrite the other, and every context must
+	// keep its own server and credentials.
+	single := `apiVersion: v1
+kind: Config
+clusters:
+- name: other
+  cluster:
+    server: https://other.example.com
+users:
+- name: other
+  user:
+    token: other-token
+contexts:
+- name: other
+  context:
+    cluster: other
+    user: other
+current-context: other
+`
+	g := NewGenerator("")
+	in := map[string]string{"prod": aceKubeconfig, "prod-cp1": single}
+
+	first, names, err := g.GenerateWithNames(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		out, n2, err := g.GenerateWithNames(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(out, first) || !reflect.DeepEqual(n2, names) {
+			t.Fatal("output not deterministic")
+		}
+	}
+	cfg, err := clientcmd.Load(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Contexts) != 4 || len(cfg.Clusters) != 4 || len(cfg.AuthInfos) != 2 {
+		t.Fatalf("lost entries: contexts=%v clusters=%v users=%v",
+			sortedKeys(cfg.Contexts), sortedKeys(cfg.Clusters), sortedKeys(cfg.AuthInfos))
+	}
+	// The explicitly selected source keeps its exact base name.
+	if got := serverOf(t, cfg, "prod-cp1"); got != "https://other.example.com" {
+		t.Errorf("prod-cp1 -> %s, want other cluster", got)
+	}
+	if tok := cfg.AuthInfos[cfg.Contexts["prod-cp1"].AuthInfo].Token; tok != "other-token" {
+		t.Errorf("prod-cp1 uses token %q", tok)
+	}
+	// The derived node context is suffixed instead.
+	if got := serverOf(t, cfg, "prod-cp1-2"); got != "https://10.0.0.1:6443" {
+		t.Errorf("prod-cp1-2 -> %s", got)
+	}
+	if tok := cfg.AuthInfos[cfg.Contexts["prod-cp1-2"].AuthInfo].Token; tok != "kubeconfig-u-abc:secret" {
+		t.Errorf("prod-cp1-2 uses token %q", tok)
+	}
+	if got := serverOf(t, cfg, "prod"); got != "https://rancher.example.com/k8s/clusters/c-abc" {
+		t.Errorf("prod -> %s", got)
+	}
+
+	wantNames := map[string][]string{
+		"prod":     {"prod", "prod-cp1-2", "prod-cp2"},
+		"prod-cp1": {"prod-cp1"},
+	}
+	if !reflect.DeepEqual(names, wantNames) {
+		t.Errorf("names = %v, want %v", names, wantNames)
+	}
+	// F039: current-context is the base context of the first sorted key.
+	if cfg.CurrentContext != "prod" {
+		t.Errorf("current-context = %q, want prod", cfg.CurrentContext)
+	}
+}
+
+func TestMergeConfigs_SameDerivedNamesAcrossSources(t *testing.T) {
+	// Two sources whose non-base entries derive to the same final name.
+	mk := func(server string) string {
+		return `apiVersion: v1
+kind: Config
+clusters:
+- name: a
+  cluster:
+    server: ` + server + `/a
+- name: b
+  cluster:
+    server: ` + server + `/b
+users:
+- name: u
+  user:
+    token: ` + server + `
+contexts:
+- name: a
+  context: {cluster: a, user: u}
+- name: b
+  context: {cluster: b, user: u}
+current-context: a
+`
+	}
+	g := NewGenerator("")
+	// Source "x" derives "x-b"; source "x-b" has base "x-b" and derives "x-b-b".
+	cfg, err := g.MergeConfigs(map[string]string{"x": mk("https://one"), "x-b": mk("https://two")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"x":     "https://one/a",
+		"x-b-2": "https://one/b",
+		"x-b":   "https://two/a",
+		"x-b-b": "https://two/b",
+	}
+	if len(cfg.Contexts) != len(want) {
+		t.Fatalf("contexts = %v", sortedKeys(cfg.Contexts))
+	}
+	for name, server := range want {
+		if got := serverOf(t, cfg, name); got != server {
+			t.Errorf("%s -> %s, want %s", name, got, server)
+		}
+	}
+	if cfg.AuthInfos[cfg.Contexts["x-b-2"].AuthInfo].Token != "https://one" {
+		t.Error("x-b-2 wired to wrong credentials")
+	}
+}
+
+func TestGenerate_SingleClusterHasCurrentContext(t *testing.T) {
+	g := NewGenerator("")
+	data, err := g.Generate(map[string]string{"my-cluster": sampleKubeconfig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := clientcmd.Load(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CurrentContext != "my-cluster" {
+		t.Errorf("current-context = %q, want my-cluster", cfg.CurrentContext)
+	}
+	// Loadable the way kubectl does, without --context.
+	if _, err := clientcmd.NewDefaultClientConfig(*cfg, nil).ClientConfig(); err != nil {
+		t.Errorf("config not usable without --context: %v", err)
+	}
+}
+
+func TestGenerate_TagsAreEscaped(t *testing.T) {
+	tags := []string{`say "hi"`, `c:\path`, "line1\nline2", "plain"}
+	g := NewGenerator("")
+	g.SetAllTags(tags)
+	data, err := g.Generate(map[string]string{"my-cluster": sampleKubeconfig})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	cfg, err := clientcmd.Load(data)
+	if err != nil {
+		t.Fatalf("output does not parse: %v\n%s", err, data)
+	}
+	ext, ok := cfg.Contexts["my-cluster"].Extensions["aptakube"]
+	if !ok {
+		t.Fatalf("aptakube extension missing:\n%s", data)
+	}
+	unk, ok := ext.(*runtime.Unknown)
+	if !ok {
+		t.Fatalf("extension type %T", ext)
+	}
+	var got AptakubeExtension
+	if err := json.Unmarshal(unk.Raw, &got); err != nil {
+		t.Fatalf("extension JSON invalid: %v (%s)", err, unk.Raw)
+	}
+	if !reflect.DeepEqual(got.Tags, tags) {
+		t.Errorf("tags = %q, want %q", got.Tags, tags)
+	}
 }

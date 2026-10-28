@@ -7,7 +7,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/kubeconfig-wrangler/pkg/config"
 	"github.com/kubeconfig-wrangler/pkg/rancher"
 )
 
@@ -34,45 +33,12 @@ Examples:
 }
 
 func init() {
-	listCmd.Flags().StringVarP(&rancherURL, "url", "u", "", "Rancher server URL (env: RANCHER_URL)")
-	listCmd.Flags().StringVarP(&accessKey, "access-key", "a", "", "Rancher API access key (env: RANCHER_ACCESS_KEY)")
-	listCmd.Flags().StringVarP(&secretKey, "secret-key", "s", "", "Rancher API secret key (env: RANCHER_SECRET_KEY)")
-	listCmd.Flags().StringVarP(&token, "token", "t", "", "Rancher API token (access_key:secret_key) (env: RANCHER_TOKEN)")
-	listCmd.Flags().StringVar(&username, "username", "", "Rancher username for password auth (env: RANCHER_USERNAME)")
-	listCmd.Flags().StringVar(&password, "password", "", "Rancher password for password auth (env: RANCHER_PASSWORD)")
-	listCmd.Flags().BoolVarP(&insecureSkipTLS, "insecure-skip-tls-verify", "k", false, "Skip TLS certificate verification (env: RANCHER_INSECURE_SKIP_TLS_VERIFY)")
-	listCmd.Flags().StringVar(&caCert, "ca-cert", "", "Path to CA certificate file (env: RANCHER_CA_CERT)")
+	registerRancherFlags(listCmd)
 }
 
 func runList(cmd *cobra.Command, args []string) error {
-	// Build configuration from flags and environment
-	cfg := config.LoadFromEnv()
-
-	// Override with command line flags if provided
-	if rancherURL != "" {
-		cfg.RancherURL = rancherURL
-	}
-	if accessKey != "" {
-		cfg.AccessKey = accessKey
-	}
-	if secretKey != "" {
-		cfg.SecretKey = secretKey
-	}
-	if token != "" {
-		cfg.Token = token
-	}
-	if username != "" {
-		cfg.Username = username
-	}
-	if password != "" {
-		cfg.Password = password
-	}
-	if cmd.Flags().Changed("insecure-skip-tls-verify") {
-		cfg.InsecureSkipTLSVerify = insecureSkipTLS
-	}
-	if caCert != "" {
-		cfg.CACert = caCert
-	}
+	// Build configuration from environment and flags
+	cfg := rancherConfigFromFlags(cmd)
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
@@ -84,6 +50,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create Rancher client: %w", err)
 	}
+	defer client.Close()
 
 	// List clusters
 	clusters, err := client.ListClusters()

@@ -12,16 +12,8 @@ import (
 )
 
 var (
-	rancherURL      string
-	accessKey       string
-	secretKey       string
-	token           string
-	username        string
-	password        string
-	clusterPrefix   string
-	outputPath      string
-	insecureSkipTLS bool
-	caCert          string
+	clusterPrefix string
+	outputPath    string
 )
 
 // generateCmd represents the generate command
@@ -36,7 +28,8 @@ The kubeconfig file can be used with kubectl, helm, and other Kubernetes tools.
 Authentication can be provided via:
   - API token (--token or RANCHER_TOKEN)
   - Access key/secret key pair (--access-key/--secret-key or RANCHER_ACCESS_KEY/RANCHER_SECRET_KEY)
-  - Username/password (--username/--password or RANCHER_USERNAME/RANCHER_PASSWORD)
+  - Username/password, Rancher local accounts only (--username/--password or RANCHER_USERNAME/RANCHER_PASSWORD);
+    users of AD, LDAP, SAML or OIDC should use an API token
 
 Examples:
   # Generate kubeconfig using API token
@@ -61,53 +54,15 @@ Examples:
 }
 
 func init() {
-	generateCmd.Flags().StringVarP(&rancherURL, "url", "u", "", "Rancher server URL (env: RANCHER_URL)")
-	generateCmd.Flags().StringVarP(&accessKey, "access-key", "a", "", "Rancher API access key (env: RANCHER_ACCESS_KEY)")
-	generateCmd.Flags().StringVarP(&secretKey, "secret-key", "s", "", "Rancher API secret key (env: RANCHER_SECRET_KEY)")
-	generateCmd.Flags().StringVarP(&token, "token", "t", "", "Rancher API token (access_key:secret_key) (env: RANCHER_TOKEN)")
-	generateCmd.Flags().StringVar(&username, "username", "", "Rancher username for password auth (env: RANCHER_USERNAME)")
-	generateCmd.Flags().StringVar(&password, "password", "", "Rancher password for password auth (env: RANCHER_PASSWORD)")
+	registerRancherFlags(generateCmd)
 	generateCmd.Flags().StringVarP(&clusterPrefix, "prefix", "p", "", "Prefix to add to cluster names (env: RANCHER_CLUSTER_PREFIX)")
 	generateCmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output file path (default: stdout) (env: RANCHER_KUBECONFIG_OUTPUT)")
-	generateCmd.Flags().BoolVarP(&insecureSkipTLS, "insecure-skip-tls-verify", "k", false, "Skip TLS certificate verification (env: RANCHER_INSECURE_SKIP_TLS_VERIFY)")
-	generateCmd.Flags().StringVar(&caCert, "ca-cert", "", "Path to CA certificate file (env: RANCHER_CA_CERT)")
 }
 
 func runGenerate(cmd *cobra.Command, args []string) error {
-	// Build configuration from flags and environment
-	cfg := config.LoadFromEnv()
-
-	// Override with command line flags if provided
-	if rancherURL != "" {
-		cfg.RancherURL = rancherURL
-	}
-	if accessKey != "" {
-		cfg.AccessKey = accessKey
-	}
-	if secretKey != "" {
-		cfg.SecretKey = secretKey
-	}
-	if token != "" {
-		cfg.Token = token
-	}
-	if username != "" {
-		cfg.Username = username
-	}
-	if password != "" {
-		cfg.Password = password
-	}
-	if clusterPrefix != "" {
-		cfg.ClusterPrefix = clusterPrefix
-	}
-	if outputPath != "" {
-		cfg.OutputPath = outputPath
-	}
-	if cmd.Flags().Changed("insecure-skip-tls-verify") {
-		cfg.InsecureSkipTLSVerify = insecureSkipTLS
-	}
-	if caCert != "" {
-		cfg.CACert = caCert
-	}
+	// Build configuration from environment and flags
+	cfg := rancherConfigFromFlags(cmd)
+	applyGenerateFlags(cmd, cfg)
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
@@ -119,19 +74,24 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create Rancher client: %w", err)
 	}
+	defer client.Close()
 
 	// Get kubeconfigs for all clusters
 	fmt.Fprintln(os.Stderr, "Fetching clusters from Rancher...")
-	kubeconfigs, err := client.GetAllKubeconfigs()
-	if err != nil {
-		return fmt.Errorf("failed to get kubeconfigs: %w", err)
+	kubeconfigs, fetchErr := client.GetAllKubeconfigs()
+	if kubeconfigs == nil && fetchErr != nil {
+		return fmt.Errorf("failed to get kubeconfigs: %w", fetchErr)
 	}
+	failed := reportClusterFailures(fetchErr, len(kubeconfigs))
 
 	if len(kubeconfigs) == 0 {
+		if failed > 0 {
+			return fmt.Errorf("failed to fetch a kubeconfig for any of the %d active cluster(s)", failed)
+		}
 		return fmt.Errorf("no active clusters found")
 	}
 
-	fmt.Fprintf(os.Stderr, "Found %d active cluster(s)\n", len(kubeconfigs))
+	fmt.Fprintf(os.Stderr, "Fetched kubeconfigs for %d active cluster(s)\n", len(kubeconfigs))
 
 	// Generate merged kubeconfig
 	generator := kubeconfig.NewGenerator(cfg.ClusterPrefix)
@@ -142,7 +102,7 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 
 	// Output the kubeconfig
 	if cfg.OutputPath != "" {
-		if err := os.WriteFile(cfg.OutputPath, kubeconfigData, 0600); err != nil {
+		if err := writeOutputFile(cfg.OutputPath, kubeconfigData); err != nil {
 			return fmt.Errorf("failed to write kubeconfig to %s: %w", cfg.OutputPath, err)
 		}
 		fmt.Fprintf(os.Stderr, "Kubeconfig written to %s\n", cfg.OutputPath)
@@ -150,5 +110,22 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		fmt.Print(string(kubeconfigData))
 	}
 
+	if failed > 0 {
+		return partialError(failed, len(kubeconfigs))
+	}
 	return nil
+}
+
+// applyGenerateFlags applies --prefix and --output on top of the environment.
+// Flags().Changed is used so an explicit empty value (-o "" for stdout,
+// -p "" for no prefix) overrides RANCHER_KUBECONFIG_OUTPUT and
+// RANCHER_CLUSTER_PREFIX.
+func applyGenerateFlags(cmd *cobra.Command, cfg *config.Config) {
+	f := cmd.Flags()
+	if f.Changed("prefix") {
+		cfg.ClusterPrefix, _ = f.GetString("prefix")
+	}
+	if f.Changed("output") {
+		cfg.OutputPath, _ = f.GetString("output")
+	}
 }

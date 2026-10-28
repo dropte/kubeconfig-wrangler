@@ -2,9 +2,12 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"log"
 	"os"
-	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +16,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
 	"gopkg.in/ini.v1"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 // EKSConfig holds the configuration for an EKS provider
@@ -101,67 +106,110 @@ func (p *EKSProvider) ProfileID() string {
 	return p.config.ProfileID
 }
 
-// ListClusters retrieves all EKS clusters in the configured region
+// EKSDescribeFailedPrefix starts the Description of a cluster that
+// ListClusters kept although its DescribeCluster call failed.
+const EKSDescribeFailedPrefix = "describe failed: "
+
+// eksCallTimeout bounds each individual EKS API call.
+const eksCallTimeout = 30 * time.Second
+
+// ListClusters retrieves all EKS clusters in the configured region, sorted by
+// name. A cluster whose DescribeCluster call fails (throttling, AccessDenied,
+// 5xx) is still listed, with State "unknown" and the error in Description, so
+// it stays visible and selectable. An error is returned only when every
+// DescribeCluster call failed.
 func (p *EKSProvider) ListClusters() ([]ClusterInfo, error) {
-	// Add timeout to prevent hanging
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	names, err := p.listClusterNames()
+	if err != nil {
+		return nil, err
+	}
 
 	var clusters []ClusterInfo
-	var nextToken *string
-
-	for {
-		output, err := p.eksClient.ListClusters(ctx, &eks.ListClustersInput{
-			NextToken: nextToken,
-		})
+	var errs []error
+	for _, name := range names {
+		cluster, err := p.describeCluster(name)
 		if err != nil {
-			return nil, fmt.Errorf("failed to list EKS clusters: %w", err)
-		}
-
-		for _, name := range output.Clusters {
-			// Get cluster details
-			describe, err := p.eksClient.DescribeCluster(ctx, &eks.DescribeClusterInput{
-				Name: aws.String(name),
-			})
-			if err != nil {
-				// Log warning but continue
-				continue
-			}
-
-			state := "unknown"
-			if describe.Cluster.Status != "" {
-				state = string(describe.Cluster.Status)
-			}
-
-			cluster := ClusterInfo{
+			log.Printf("EKS: failed to describe cluster %s: %v", name, err)
+			errs = append(errs, fmt.Errorf("cluster %s: %w", name, err))
+			cluster = ClusterInfo{
 				ID:          name,
 				Name:        name,
-				State:       state,
+				State:       "unknown",
 				Provider:    "eks",
 				ProfileID:   p.config.ProfileID,
 				ProfileName: p.config.ProfileName,
 				Region:      p.config.Region,
+				Description: EKSDescribeFailedPrefix + err.Error(),
 			}
-
-			if describe.Cluster.Arn != nil {
-				cluster.Description = *describe.Cluster.Arn
-			}
-
-			clusters = append(clusters, cluster)
 		}
+		clusters = append(clusters, cluster)
+	}
+
+	if len(names) > 0 && len(errs) == len(names) {
+		return nil, fmt.Errorf("failed to describe any EKS cluster: %w", errors.Join(errs...))
+	}
+
+	sort.Slice(clusters, func(i, j int) bool { return clusters[i].Name < clusters[j].Name })
+	return clusters, nil
+}
+
+// listClusterNames pages through ListClusters, giving each page its own timeout.
+func (p *EKSProvider) listClusterNames() ([]string, error) {
+	var names []string
+	var nextToken *string
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), eksCallTimeout)
+		output, err := p.eksClient.ListClusters(ctx, &eks.ListClustersInput{
+			NextToken: nextToken,
+		})
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("failed to list EKS clusters: %w", err)
+		}
+		names = append(names, output.Clusters...)
 
 		if output.NextToken == nil {
-			break
+			return names, nil
 		}
 		nextToken = output.NextToken
 	}
+}
 
-	return clusters, nil
+// describeCluster fetches one cluster's details with its own timeout.
+func (p *EKSProvider) describeCluster(name string) (ClusterInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), eksCallTimeout)
+	defer cancel()
+
+	describe, err := p.eksClient.DescribeCluster(ctx, &eks.DescribeClusterInput{
+		Name: aws.String(name),
+	})
+	if err != nil {
+		return ClusterInfo{}, err
+	}
+
+	cluster := ClusterInfo{
+		ID:          name,
+		Name:        name,
+		State:       "unknown",
+		Provider:    "eks",
+		ProfileID:   p.config.ProfileID,
+		ProfileName: p.config.ProfileName,
+		Region:      p.config.Region,
+	}
+	if describe.Cluster != nil {
+		if describe.Cluster.Status != "" {
+			cluster.State = string(describe.Cluster.Status)
+		}
+		if describe.Cluster.Arn != nil {
+			cluster.Description = *describe.Cluster.Arn
+		}
+	}
+	return cluster, nil
 }
 
 // GetKubeconfig generates a kubeconfig for a specific EKS cluster
 func (p *EKSProvider) GetKubeconfig(clusterID string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), eksCallTimeout)
 	defer cancel()
 
 	describe, err := p.eksClient.DescribeCluster(ctx, &eks.DescribeClusterInput{
@@ -172,88 +220,77 @@ func (p *EKSProvider) GetKubeconfig(clusterID string) (string, error) {
 	}
 
 	cluster := describe.Cluster
-	if cluster.Endpoint == nil || cluster.CertificateAuthority == nil || cluster.CertificateAuthority.Data == nil {
+	if cluster == nil || cluster.Endpoint == nil || cluster.CertificateAuthority == nil || cluster.CertificateAuthority.Data == nil {
 		return "", fmt.Errorf("cluster %s is missing required fields", clusterID)
 	}
 
 	// Generate kubeconfig that uses aws eks get-token for authentication
-	kubeconfig := p.generateKubeconfig(
+	return p.generateKubeconfig(
 		clusterID,
 		*cluster.Endpoint,
 		*cluster.CertificateAuthority.Data,
 	)
-
-	return kubeconfig, nil
 }
 
-// generateKubeconfig creates a kubeconfig YAML for an EKS cluster
-func (p *EKSProvider) generateKubeconfig(clusterName, endpoint, caData string) string {
-	// Build the aws CLI command for authentication
-	var awsArgs []string
+// EmbedsCredentials reports whether generated kubeconfigs contain the static
+// AWS access key, secret key and (if set) session token in plain text.
+func (p *EKSProvider) EmbedsCredentials() bool {
+	return p.config.AccessKey != "" && p.config.SecretKey != ""
+}
 
-	if p.config.AWSProfile != "" {
-		awsArgs = append(awsArgs, "--profile", p.config.AWSProfile)
+// generateKubeconfig creates a kubeconfig YAML for an EKS cluster.
+// caData is the base64-encoded CA bundle as returned by DescribeCluster.
+func (p *EKSProvider) generateKubeconfig(clusterName, endpoint, caData string) (string, error) {
+	ca, err := base64.StdEncoding.DecodeString(caData)
+	if err != nil {
+		return "", fmt.Errorf("cluster %s has invalid certificate authority data: %w", clusterName, err)
 	}
 
-	awsArgs = append(awsArgs, "eks", "get-token", "--cluster-name", clusterName, "--region", p.config.Region)
+	// Build the aws CLI command for authentication
+	// Follow NewEKSProvider's precedence: static keys win over the profile.
+	// An explicit --profile would disable the aws CLI's environment
+	// credential provider, so it is only passed when no keys are embedded.
+	var args []string
+	if !p.EmbedsCredentials() && p.config.AWSProfile != "" {
+		args = append(args, "--profile", p.config.AWSProfile)
+	}
+	args = append(args, "eks", "get-token", "--cluster-name", clusterName, "--region", p.config.Region)
 
-	// Build the exec command
-	execCommand := "aws"
-	execArgs := strings.Join(awsArgs, "\n            - ")
+	exec := &clientcmdapi.ExecConfig{
+		APIVersion:      "client.authentication.k8s.io/v1beta1",
+		Command:         "aws",
+		Args:            args,
+		InteractiveMode: clientcmdapi.NeverExecInteractiveMode,
+	}
 
-	// If using direct credentials, we need to set environment variables
-	var execEnv string
-	if p.config.AccessKey != "" && p.config.SecretKey != "" {
-		execEnv = fmt.Sprintf(`
-          env:
-            - name: AWS_ACCESS_KEY_ID
-              value: %s
-            - name: AWS_SECRET_ACCESS_KEY
-              value: %s`, p.config.AccessKey, p.config.SecretKey)
+	// Direct credentials are passed to the aws CLI through environment variables.
+	if p.EmbedsCredentials() {
+		exec.Env = []clientcmdapi.ExecEnvVar{
+			{Name: "AWS_ACCESS_KEY_ID", Value: p.config.AccessKey},
+			{Name: "AWS_SECRET_ACCESS_KEY", Value: p.config.SecretKey},
+		}
 		if p.config.SessionToken != "" {
-			execEnv += fmt.Sprintf(`
-            - name: AWS_SESSION_TOKEN
-              value: %s`, p.config.SessionToken)
+			exec.Env = append(exec.Env, clientcmdapi.ExecEnvVar{Name: "AWS_SESSION_TOKEN", Value: p.config.SessionToken})
 		}
 	}
 
-	kubeconfig := fmt.Sprintf(`apiVersion: v1
-kind: Config
-clusters:
-  - name: %s
-    cluster:
-      server: %s
-      certificate-authority-data: %s
-contexts:
-  - name: %s
-    context:
-      cluster: %s
-      user: %s
-current-context: %s
-users:
-  - name: %s
-    user:
-      exec:
-        apiVersion: client.authentication.k8s.io/v1beta1
-        command: %s
-        args:
-            - %s%s
-        interactiveMode: Never
-`,
-		clusterName,
-		endpoint,
-		caData,
-		clusterName,
-		clusterName,
-		clusterName,
-		clusterName,
-		clusterName,
-		execCommand,
-		execArgs,
-		execEnv,
-	)
+	cfg := clientcmdapi.NewConfig()
+	cfg.Clusters[clusterName] = &clientcmdapi.Cluster{
+		Server:                   endpoint,
+		CertificateAuthorityData: ca,
+	}
+	cfg.AuthInfos[clusterName] = &clientcmdapi.AuthInfo{Exec: exec}
+	cfg.Contexts[clusterName] = &clientcmdapi.Context{
+		Cluster:  clusterName,
+		AuthInfo: clusterName,
+	}
+	cfg.CurrentContext = clusterName
 
-	return kubeconfig
+	data, err := clientcmd.Write(*cfg)
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize kubeconfig for cluster %s: %w", clusterName, err)
+	}
+	return string(data), nil
 }
 
 // Close cleans up any resources held by the provider
@@ -261,70 +298,71 @@ func (p *EKSProvider) Close() error {
 	return nil
 }
 
-// ListAWSProfiles returns the list of AWS CLI profiles configured on the system
+// ListAWSProfiles returns the sorted list of AWS CLI profiles defined in the
+// shared credentials and config files. AWS_SHARED_CREDENTIALS_FILE and
+// AWS_CONFIG_FILE override the default ~/.aws locations.
 func ListAWSProfiles() ([]string, error) {
-	var profiles []string
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get home directory: %w", err)
+	credentialsPath := os.Getenv("AWS_SHARED_CREDENTIALS_FILE")
+	if credentialsPath == "" {
+		credentialsPath = config.DefaultSharedCredentialsFilename()
+	}
+	configPath := os.Getenv("AWS_CONFIG_FILE")
+	if configPath == "" {
+		configPath = config.DefaultSharedConfigFilename()
 	}
 
-	// Check credentials file
-	credentialsPath := filepath.Join(homeDir, ".aws", "credentials")
-	if _, err := os.Stat(credentialsPath); err == nil {
-		cfg, err := ini.Load(credentialsPath)
-		if err == nil {
-			for _, section := range cfg.Sections() {
-				name := section.Name()
-				if name != "DEFAULT" && name != "" {
-					profiles = append(profiles, name)
-				}
+	seen := make(map[string]bool)
+
+	// Credentials file sections are bare profile names.
+	for _, section := range loadAWSIniSections(credentialsPath) {
+		if name := strings.TrimSpace(section); name != "" {
+			seen[name] = true
+		}
+	}
+
+	// Config file sections are "[default]" or "[profile <name>]"; other
+	// section kinds (sso-session, services, ...) are not profiles.
+	for _, section := range loadAWSIniSections(configPath) {
+		name := strings.TrimSpace(section)
+		switch {
+		case name == "default":
+			seen["default"] = true
+		case strings.HasPrefix(name, "profile ") || strings.HasPrefix(name, "profile\t"):
+			if profile := strings.TrimSpace(name[len("profile"):]); profile != "" {
+				seen[profile] = true
 			}
 		}
 	}
 
-	// Check config file for additional profiles
-	configPath := filepath.Join(homeDir, ".aws", "config")
-	if _, err := os.Stat(configPath); err == nil {
-		cfg, err := ini.Load(configPath)
-		if err == nil {
-			for _, section := range cfg.Sections() {
-				name := section.Name()
-				// Config file uses "profile <name>" format
-				if strings.HasPrefix(name, "profile ") {
-					profileName := strings.TrimPrefix(name, "profile ")
-					// Avoid duplicates
-					found := false
-					for _, p := range profiles {
-						if p == profileName {
-							found = true
-							break
-						}
-					}
-					if !found {
-						profiles = append(profiles, profileName)
-					}
-				}
-			}
-		}
+	profiles := make([]string, 0, len(seen))
+	for name := range seen {
+		profiles = append(profiles, name)
 	}
-
-	// Always include "default" if credentials exist
-	if len(profiles) > 0 {
-		hasDefault := false
-		for _, p := range profiles {
-			if p == "default" {
-				hasDefault = true
-				break
-			}
-		}
-		if !hasDefault {
-			profiles = append([]string{"default"}, profiles...)
-		}
-	}
-
+	sort.Strings(profiles)
 	return profiles, nil
+}
+
+// loadAWSIniSections returns the section names of an AWS ini file. A missing
+// file yields nothing; a parse error is logged and yields nothing.
+func loadAWSIniSections(path string) []string {
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+	cfg, err := ini.LoadSources(ini.LoadOptions{AllowNestedValues: true}, path)
+	if err != nil {
+		log.Printf("Warning: failed to parse AWS file %s: %v", path, err)
+		return nil
+	}
+	var names []string
+	for _, section := range cfg.Sections() {
+		if name := section.Name(); name != ini.DefaultSection {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // ListAWSRegions returns a list of common AWS regions
@@ -361,4 +399,3 @@ func ListAWSRegions() []string {
 		"sa-east-1",
 	}
 }
-

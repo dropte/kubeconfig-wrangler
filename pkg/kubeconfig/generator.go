@@ -2,7 +2,10 @@
 package kubeconfig
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/clientcmd"
@@ -58,146 +61,241 @@ func (g *Generator) ParseKubeconfig(data string) (*api.Config, error) {
 	return config, nil
 }
 
-// ApplyPrefix applies the configured prefix to all cluster, context, and user names in the config
-// It renames all entries to use clusterName as the base to ensure uniqueness when merging
+// ApplyPrefix renames all clusters, contexts and users in config to names
+// based on prefix+clusterName so that configs can be merged without clashes.
+//
+// The result is deterministic and keeps entries identifiable:
+//   - The "base" context is config.CurrentContext when it exists, otherwise
+//     the lexicographically smallest context name. It, and the cluster and
+//     user it references, are renamed to prefix+clusterName.
+//   - Every other context, cluster and user is renamed to
+//     base + "-" + suffix, where suffix is its original name with the base
+//     context's original cluster name (plus a separator) stripped when that
+//     is a prefix. Rancher's ACE contexts "prod", "prod-cp1", "prod-cp2"
+//     therefore become "<p>prod", "<p>prod-cp1", "<p>prod-cp2".
+//   - Name clashes inside one config are resolved with "-2", "-3", ... in
+//     sorted order.
+//
+// CurrentContext of the result is the base context, or "" when the config
+// has no contexts.
 func (g *Generator) ApplyPrefix(config *api.Config, clusterName string) *api.Config {
-	// Always use clusterName as the base, with optional prefix
-	newName := fmt.Sprintf("%s%s", g.prefix, clusterName)
+	base := g.prefix + clusterName
 
-	// Create new maps with renamed entries
-	newClusters := make(map[string]*api.Cluster)
-	newContexts := make(map[string]*api.Context)
-	newAuthInfos := make(map[string]*api.AuthInfo)
-
-	// Build a mapping from old cluster names to new names
-	clusterNameMap := make(map[string]string)
-	authNameMap := make(map[string]string)
-
-	// Rename clusters - use clusterName as base for the first/only cluster
-	i := 0
-	for oldName, cluster := range config.Clusters {
-		var mappedName string
-		if i == 0 {
-			mappedName = newName
-		} else {
-			mappedName = fmt.Sprintf("%s-%d", newName, i)
-		}
-		clusterNameMap[oldName] = mappedName
-		newClusters[mappedName] = cluster
-		i++
+	baseCtxName := ""
+	if _, ok := config.Contexts[config.CurrentContext]; ok && config.CurrentContext != "" {
+		baseCtxName = config.CurrentContext
+	} else if names := sortedKeys(config.Contexts); len(names) > 0 {
+		baseCtxName = names[0]
 	}
 
-	// Rename auth infos (users) - use clusterName as base
-	i = 0
-	for oldName, authInfo := range config.AuthInfos {
-		var mappedName string
-		if i == 0 {
-			mappedName = newName
-		} else {
-			mappedName = fmt.Sprintf("%s-%d", newName, i)
+	var baseCtx *api.Context
+	stripPrefixes := []string{}
+	if baseCtxName != "" {
+		baseCtx = config.Contexts[baseCtxName]
+		if baseCtx.Cluster != "" {
+			stripPrefixes = append(stripPrefixes, baseCtx.Cluster)
 		}
-		authNameMap[oldName] = mappedName
-		newAuthInfos[mappedName] = authInfo
-		i++
+		if baseCtxName != baseCtx.Cluster {
+			stripPrefixes = append(stripPrefixes, baseCtxName)
+		}
 	}
 
-	// Rename and update contexts
-	i = 0
-	for _, context := range config.Contexts {
-		var newContextName string
-		if i == 0 {
-			newContextName = newName
-		} else {
-			newContextName = fmt.Sprintf("%s-%d", newName, i)
-		}
-
-		// Create a copy of the context with updated references
-		newContext := context.DeepCopy()
-
-		// Update cluster reference using the mapping
-		if mappedCluster, exists := clusterNameMap[context.Cluster]; exists {
-			newContext.Cluster = mappedCluster
-		}
-
-		// Update auth info reference using the mapping
-		if context.AuthInfo != "" {
-			if mappedAuth, exists := authNameMap[context.AuthInfo]; exists {
-				newContext.AuthInfo = mappedAuth
+	derive := func(orig string) string {
+		for _, p := range stripPrefixes {
+			// Only strip at a separator so "production" is not cut by "prod".
+			rest, ok := strings.CutPrefix(orig, p)
+			if ok && rest != "" && strings.ContainsRune("-_.@:", rune(rest[0])) {
+				if rest = strings.TrimLeft(rest, "-_.@:"); rest != "" {
+					return base + "-" + rest
+				}
 			}
 		}
-
-		newContexts[newContextName] = newContext
-		i++
+		return base + "-" + orig
 	}
 
-	// Update current context to the new name
-	newCurrentContext := newName
-
-	return &api.Config{
-		Kind:           config.Kind,
-		APIVersion:     config.APIVersion,
-		Clusters:       newClusters,
-		Contexts:       newContexts,
-		AuthInfos:      newAuthInfos,
-		CurrentContext: newCurrentContext,
-		Preferences:    config.Preferences,
-		Extensions:     config.Extensions,
+	// rename assigns new names for all keys of one kind: baseKey (if any)
+	// gets base, the rest get derived names made unique in sorted order.
+	rename := func(keys []string, baseKey string) map[string]string {
+		mapping := make(map[string]string, len(keys))
+		used := map[string]bool{base: true}
+		if baseKey != "" {
+			mapping[baseKey] = base
+		}
+		for _, k := range keys {
+			if _, done := mapping[k]; done {
+				continue
+			}
+			name := uniqueName(derive(k), func(n string) bool { return used[n] })
+			used[name] = true
+			mapping[k] = name
+		}
+		return mapping
 	}
+
+	var baseCluster, baseUser string
+	if baseCtx != nil {
+		if _, ok := config.Clusters[baseCtx.Cluster]; ok {
+			baseCluster = baseCtx.Cluster
+		}
+		if _, ok := config.AuthInfos[baseCtx.AuthInfo]; ok {
+			baseUser = baseCtx.AuthInfo
+		}
+	}
+	clusterMap := rename(sortedKeys(config.Clusters), baseCluster)
+	authMap := rename(sortedKeys(config.AuthInfos), baseUser)
+	contextMap := rename(sortedKeys(config.Contexts), baseCtxName)
+
+	out := &api.Config{
+		Kind:        config.Kind,
+		APIVersion:  config.APIVersion,
+		Clusters:    make(map[string]*api.Cluster, len(config.Clusters)),
+		Contexts:    make(map[string]*api.Context, len(config.Contexts)),
+		AuthInfos:   make(map[string]*api.AuthInfo, len(config.AuthInfos)),
+		Preferences: config.Preferences,
+		Extensions:  config.Extensions,
+	}
+	for old, c := range config.Clusters {
+		out.Clusters[clusterMap[old]] = c.DeepCopy()
+	}
+	for old, a := range config.AuthInfos {
+		out.AuthInfos[authMap[old]] = a.DeepCopy()
+	}
+	for old, c := range config.Contexts {
+		nc := c.DeepCopy()
+		if mapped, ok := clusterMap[c.Cluster]; ok {
+			nc.Cluster = mapped
+		}
+		if mapped, ok := authMap[c.AuthInfo]; ok {
+			nc.AuthInfo = mapped
+		}
+		out.Contexts[contextMap[old]] = nc
+	}
+	if baseCtxName != "" {
+		out.CurrentContext = base
+	}
+	return out
 }
 
-// MergeConfigs merges multiple kubeconfig strings into a single config
-// The clusterKubeconfigs map has cluster names as keys and kubeconfig YAML strings as values
+// MergeConfigs merges multiple kubeconfig strings into a single config.
+// The clusterKubeconfigs map has cluster names as keys and kubeconfig YAML
+// strings as values. Inputs are processed in sorted key order, and a name
+// that already exists in the merged config is never overwritten: it gets a
+// "-2", "-3", ... suffix instead (with the references inside its contexts
+// updated accordingly). CurrentContext is set to the base context of the
+// first input (in sorted order) that has one.
 func (g *Generator) MergeConfigs(clusterKubeconfigs map[string]string) (*api.Config, error) {
-	mergedConfig := api.NewConfig()
-
-	for clusterName, kubeconfigData := range clusterKubeconfigs {
-		config, err := g.ParseKubeconfig(kubeconfigData)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse kubeconfig for cluster %s: %w", clusterName, err)
-		}
-
-		// Apply prefix to this config
-		prefixedConfig := g.ApplyPrefix(config, clusterName)
-
-		// Merge into the combined config
-		for name, cluster := range prefixedConfig.Clusters {
-			mergedConfig.Clusters[name] = cluster
-		}
-
-		for name, context := range prefixedConfig.Contexts {
-			// Add Aptakube extension if tags are specified
-			tags := g.getTagsForContext(name)
-			if len(tags) > 0 {
-				if context.Extensions == nil {
-					context.Extensions = make(map[string]runtime.Object)
-				}
-				context.Extensions["aptakube"] = &runtime.Unknown{
-					Raw: g.buildAptakubeExtensionJSON(tags),
-				}
-			}
-			mergedConfig.Contexts[name] = context
-		}
-
-		for name, authInfo := range prefixedConfig.AuthInfos {
-			mergedConfig.AuthInfos[name] = authInfo
-		}
-	}
-
-	return mergedConfig, nil
+	merged, _, err := g.mergeConfigs(clusterKubeconfigs)
+	return merged, err
 }
 
-// buildAptakubeExtensionJSON builds the JSON for the Aptakube extension
-func (g *Generator) buildAptakubeExtensionJSON(tags []string) []byte {
-	// Build the JSON manually to ensure proper format
-	result := `{"tags":[`
-	for i, tag := range tags {
-		if i > 0 {
-			result += ","
+func (g *Generator) mergeConfigs(clusterKubeconfigs map[string]string) (*api.Config, map[string][]string, error) {
+	keys := sortedKeys(clusterKubeconfigs)
+
+	prefixed := make([]*api.Config, len(keys))
+	// Each source's base name is reserved up front so that a derived name
+	// from one source (e.g. "prod-cp1") never takes the base name of another
+	// source the user explicitly selected (a cluster called "prod-cp1").
+	reserved := make(map[string]bool, len(keys))
+	for i, key := range keys {
+		config, err := g.ParseKubeconfig(clusterKubeconfigs[key])
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to parse kubeconfig for cluster %s: %w", key, err)
 		}
-		result += fmt.Sprintf(`"%s"`, tag)
+		prefixed[i] = g.ApplyPrefix(config, key)
+		reserved[g.prefix+key] = true
 	}
-	result += `]}`
-	return []byte(result)
+
+	merged := api.NewConfig()
+	contextNames := make(map[string][]string, len(keys))
+
+	for i, key := range keys {
+		pc := prefixed[i]
+		base := g.prefix + key
+
+		// alloc picks the final name for an entry of one kind.
+		alloc := func(name string, exists func(string) bool) string {
+			if name == base && !exists(name) {
+				return name
+			}
+			return uniqueName(name, func(n string) bool { return exists(n) || (reserved[n] && n != base) })
+		}
+
+		clusterMap := make(map[string]string, len(pc.Clusters))
+		for _, name := range sortedKeys(pc.Clusters) {
+			final := alloc(name, func(n string) bool { _, ok := merged.Clusters[n]; return ok })
+			clusterMap[name] = final
+			merged.Clusters[final] = pc.Clusters[name]
+		}
+		authMap := make(map[string]string, len(pc.AuthInfos))
+		for _, name := range sortedKeys(pc.AuthInfos) {
+			final := alloc(name, func(n string) bool { _, ok := merged.AuthInfos[n]; return ok })
+			authMap[name] = final
+			merged.AuthInfos[final] = pc.AuthInfos[name]
+		}
+
+		var names []string
+		for _, name := range sortedKeys(pc.Contexts) {
+			final := alloc(name, func(n string) bool { _, ok := merged.Contexts[n]; return ok })
+			ctx := pc.Contexts[name]
+			if mapped, ok := clusterMap[ctx.Cluster]; ok {
+				ctx.Cluster = mapped
+			}
+			if mapped, ok := authMap[ctx.AuthInfo]; ok {
+				ctx.AuthInfo = mapped
+			}
+			if tags := g.getTagsForContext(final); len(tags) > 0 {
+				if ctx.Extensions == nil {
+					ctx.Extensions = make(map[string]runtime.Object)
+				}
+				ctx.Extensions["aptakube"] = &runtime.Unknown{
+					Raw:         buildAptakubeExtensionJSON(tags),
+					ContentType: runtime.ContentTypeJSON,
+				}
+			}
+			merged.Contexts[final] = ctx
+
+			if name == pc.CurrentContext {
+				// Base context first, so callers can rely on names[0].
+				names = append([]string{final}, names...)
+				if merged.CurrentContext == "" {
+					merged.CurrentContext = final
+				}
+			} else {
+				names = append(names, final)
+			}
+		}
+		contextNames[key] = names
+	}
+
+	return merged, contextNames, nil
+}
+
+// buildAptakubeExtensionJSON builds the JSON for the Aptakube extension.
+func buildAptakubeExtensionJSON(tags []string) []byte {
+	// Marshalling a struct of strings cannot fail.
+	b, _ := json.Marshal(AptakubeExtension{Tags: tags})
+	return b
+}
+
+// uniqueName returns name if it is not taken, otherwise name-2, name-3, ...
+func uniqueName(name string, taken func(string) bool) string {
+	if !taken(name) {
+		return name
+	}
+	for i := 2; ; i++ {
+		if candidate := fmt.Sprintf("%s-%d", name, i); !taken(candidate) {
+			return candidate
+		}
+	}
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // Serialize converts a kubeconfig to YAML format
@@ -211,10 +309,21 @@ func (g *Generator) Serialize(config *api.Config) ([]byte, error) {
 
 // Generate creates a merged kubeconfig from multiple cluster kubeconfigs
 func (g *Generator) Generate(clusterKubeconfigs map[string]string) ([]byte, error) {
-	mergedConfig, err := g.MergeConfigs(clusterKubeconfigs)
-	if err != nil {
-		return nil, err
-	}
+	data, _, err := g.GenerateWithNames(clusterKubeconfigs)
+	return data, err
+}
 
-	return g.Serialize(mergedConfig)
+// GenerateWithNames is Generate that also reports, per input key, the final
+// context names written for it. The base context (the one named after the
+// key) comes first in each slice.
+func (g *Generator) GenerateWithNames(clusterKubeconfigs map[string]string) ([]byte, map[string][]string, error) {
+	merged, names, err := g.mergeConfigs(clusterKubeconfigs)
+	if err != nil {
+		return nil, nil, err
+	}
+	data, err := g.Serialize(merged)
+	if err != nil {
+		return nil, nil, err
+	}
+	return data, names, nil
 }

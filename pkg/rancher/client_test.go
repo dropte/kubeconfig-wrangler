@@ -2,8 +2,11 @@ package rancher
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/kubeconfig-wrangler/pkg/config"
@@ -492,5 +495,184 @@ func TestCluster_JSON(t *testing.T) {
 	}
 	if cluster.Actions.GenerateKubeconfig == "" {
 		t.Error("Actions.GenerateKubeconfig should not be empty")
+	}
+}
+
+func TestClient_GetAllKubeconfigs_PartialFailure(t *testing.T) {
+	clusters := []Cluster{
+		{ID: "c-ok", Name: "ok", State: "active"},
+		{ID: "c-bad1", Name: "bad1", State: "active"},
+		{ID: "c-bad2", Name: "bad2", State: "active"},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v3/clusters" {
+			_ = json.NewEncoder(w).Encode(ClusterCollection{Data: clusters})
+			return
+		}
+		if r.URL.Path == "/v3/clusters/c-ok" {
+			_ = json.NewEncoder(w).Encode(KubeconfigResponse{Config: testKubeconfig})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(&config.Config{RancherURL: server.URL, AccessKey: "a", SecretKey: "s", AuthMethod: config.AuthMethodToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	kubeconfigs, err := client.GetAllKubeconfigs()
+	if err == nil {
+		t.Fatal("expected an error for the failed clusters")
+	}
+	if len(kubeconfigs) != 1 || kubeconfigs["ok"] == "" {
+		t.Errorf("expected the partial map with cluster ok, got %v", kubeconfigs)
+	}
+	var joined interface{ Unwrap() []error }
+	if !errors.As(err, &joined) || len(joined.Unwrap()) != 2 {
+		t.Errorf("expected 2 joined errors, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "bad1") || !strings.Contains(err.Error(), "bad2") {
+		t.Errorf("error should name the failed clusters: %v", err)
+	}
+}
+
+func TestClient_Close_LogsOutPasswordSession(t *testing.T) {
+	var mu sync.Mutex
+	var logouts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v3-public/localProviders/local":
+			_ = json.NewEncoder(w).Encode(LoginResponse{Token: "token-x:y"})
+		case r.URL.Path == "/v3/tokens" && r.URL.Query().Get("action") == "logout" && r.Method == http.MethodPost:
+			mu.Lock()
+			logouts = append(logouts, r.Header.Get("Authorization"))
+			mu.Unlock()
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(&config.Config{RancherURL: server.URL, Username: "u", Password: "p", AuthMethod: config.AuthMethodPassword})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logouts) != 1 || logouts[0] != "Bearer token-x:y" {
+		t.Errorf("logout calls = %v, want exactly one with the session bearer", logouts)
+	}
+}
+
+func TestClient_Close_TokenAuthDoesNotLogOut(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer server.Close()
+
+	client, err := NewClient(&config.Config{RancherURL: server.URL, AccessKey: "a", SecretKey: "s", AuthMethod: config.AuthMethodToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	if called {
+		t.Error("Close must not call the server for token auth")
+	}
+}
+
+func TestClient_LoginFailureHint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	_, err := NewClient(&config.Config{RancherURL: server.URL, Username: "u", Password: "p", AuthMethod: config.AuthMethodPassword})
+	if err == nil || !strings.Contains(err.Error(), "API token") {
+		t.Errorf("error = %v, want API token hint", err)
+	}
+}
+
+func TestClient_TransportUsesProxyFromEnvironment(t *testing.T) {
+	client, err := NewClient(&config.Config{RancherURL: "https://r.example.com", AccessKey: "a", SecretKey: "s", AuthMethod: config.AuthMethodToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr, ok := client.httpClient.Transport.(*http.Transport); !ok || tr.Proxy == nil {
+		t.Error("transport must honour HTTP(S)_PROXY")
+	}
+}
+
+func TestClient_GetClusterKubeconfig_EmptyConfigIsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(&config.Config{RancherURL: server.URL, AuthMethod: config.AuthMethodToken, AccessKey: "a", SecretKey: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.GetClusterKubeconfig(&Cluster{ID: "c-1", Name: "one"})
+	if err == nil || !strings.Contains(err.Error(), "empty kubeconfig for cluster one") {
+		t.Errorf("error = %v, want empty kubeconfig error", err)
+	}
+}
+
+func TestClient_GetAllKubeconfigs_EmptyConfigCountsAsFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v3/clusters":
+			_ = json.NewEncoder(w).Encode(ClusterCollection{Data: []Cluster{
+				{ID: "c-1", Name: "good", State: "active"},
+				{ID: "c-2", Name: "empty", State: "active"},
+			}})
+		case "/v3/clusters/c-1":
+			_ = json.NewEncoder(w).Encode(KubeconfigResponse{Config: testKubeconfig})
+		default:
+			_ = json.NewEncoder(w).Encode(KubeconfigResponse{Config: "  "})
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(&config.Config{RancherURL: server.URL, AuthMethod: config.AuthMethodToken, AccessKey: "a", SecretKey: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.GetAllKubeconfigs()
+	if err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error = %v, want per-cluster failure for the empty config", err)
+	}
+	if _, ok := got["empty"]; ok || len(got) != 1 {
+		t.Errorf("kubeconfigs = %v, want only the good cluster", got)
+	}
+}
+
+func TestClient_RedirectIsNotFollowed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/elsewhere" {
+			_ = json.NewEncoder(w).Encode(KubeconfigResponse{Config: testKubeconfig})
+			return
+		}
+		http.Redirect(w, r, "/elsewhere", http.StatusMovedPermanently)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(&config.Config{RancherURL: server.URL, AuthMethod: config.AuthMethodToken, AccessKey: "a", SecretKey: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.GetClusterKubeconfig(&Cluster{ID: "c-1", Name: "one"})
+	if err == nil || !strings.Contains(err.Error(), "status 301") {
+		t.Errorf("error = %v, want status 301", err)
 	}
 }

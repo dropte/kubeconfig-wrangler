@@ -1,0 +1,25 @@
+version: "2"
+
+# Default linter set (errcheck, govet, ineffassign, staticcheck, unused).
+linters:
+  default: standard
+  settings:
+    errcheck:
+      # Ignoring these errors is idiomatic (deferred cleanup, terminal output).
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - os.Remove
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*text/tabwriter.Writer).Flush
+        - (github.com/kubeconfig-wrangler/pkg/provider.ClusterProvider).Close
+        - (*github.com/kubeconfig-wrangler/pkg/provider.EKSProvider).Close
+        - (*github.com/kubeconfig-wrangler/pkg/provider.RancherProvider).Close
+        - (*github.com/kubeconfig-wrangler/pkg/provider.StaticProvider).Close
+        - (*github.com/kubeconfig-wrangler/pkg/rancher.Client).Close
+
+formatters:
+  enable:
+    - gofmt
