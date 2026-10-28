@@ -791,22 +791,27 @@ func (s *Server) markClustersInLocalKubeconfig(clusters []provider.ClusterInfo) 
 	}
 
 	for i := range clusters {
-		// Check if the cluster name or alias exactly matches any local cluster/context name
-		if localNames[clusters[i].Name] {
-			clusters[i].InLocalKubeconfig = true
-			continue
-		}
-		if clusters[i].Alias != "" && localNames[clusters[i].Alias] {
-			clusters[i].InLocalKubeconfig = true
-			continue
+		c := &clusters[i]
+
+		// A tracked export (merged through this app) is the most precise
+		// match, since the context may carry a prefix or alias.
+		if s.profileStore != nil && c.ProfileID != "" {
+			if exported := s.profileStore.GetExportedContext(c.ProfileID, c.ID); exported != "" && localNames[exported] {
+				c.InLocalKubeconfig = true
+				c.LocalContext = exported
+				continue
+			}
 		}
 
-		// Check if this cluster was exported (merged) with a tracked context name
-		if s.profileStore != nil && clusters[i].ProfileID != "" {
-			exportedContextName := s.profileStore.GetExportedContext(clusters[i].ProfileID, clusters[i].ID)
-			if exportedContextName != "" && localNames[exportedContextName] {
-				clusters[i].InLocalKubeconfig = true
-			}
+		// Otherwise match the alias or the provider's cluster name exactly.
+		if c.Alias != "" && localNames[c.Alias] {
+			c.InLocalKubeconfig = true
+			c.LocalContext = c.Alias
+			continue
+		}
+		if localNames[c.Name] {
+			c.InLocalKubeconfig = true
+			c.LocalContext = c.Name
 		}
 	}
 }
@@ -2134,6 +2139,7 @@ const indexHTML = `<!DOCTYPE html>
             display: flex;
             flex-direction: column;
             overflow: hidden;
+            min-width: 0;
         }
 
         .content-header {
@@ -2168,6 +2174,7 @@ const indexHTML = `<!DOCTYPE html>
         .cluster-table {
             width: 100%;
             border-collapse: collapse;
+            table-layout: fixed;
         }
 
         .cluster-table th {
@@ -2189,10 +2196,24 @@ const indexHTML = `<!DOCTYPE html>
             text-align: center;
         }
 
+        /* The cluster column takes whatever is left; the others stay compact
+           so names never get squeezed when the kubeconfig panel is open. */
+        .cluster-table th:nth-child(3) { width: 22%; }
+        .cluster-table th:nth-child(4) { width: 90px; }
+        .cluster-table th:nth-child(5) { width: 96px; }
+
+        @media (max-width: 1100px) {
+            body:not(.kubeconfig-collapsed) .cluster-table th:nth-child(4),
+            body:not(.kubeconfig-collapsed) .cluster-table td:nth-child(4) {
+                display: none;
+            }
+        }
+
         .cluster-table td {
             padding: 10px 12px;
             border-bottom: 1px solid var(--border);
             vertical-align: middle;
+            overflow-wrap: anywhere;
         }
 
         .cluster-table tr:hover {
@@ -2219,6 +2240,7 @@ const indexHTML = `<!DOCTYPE html>
         .cluster-name-row {
             display: flex;
             align-items: center;
+            flex-wrap: wrap;
             gap: 4px;
         }
 
@@ -2262,6 +2284,7 @@ const indexHTML = `<!DOCTYPE html>
             border-radius: 10px;
             font-size: 11px;
             font-weight: 500;
+            white-space: nowrap;
         }
 
         .status-badge::before {
@@ -2310,6 +2333,7 @@ const indexHTML = `<!DOCTYPE html>
             background: rgba(78, 201, 176, 0.15);
             color: var(--success);
             margin-left: 8px;
+            white-space: nowrap;
         }
 
         .local-config-badge::before {
@@ -2630,14 +2654,165 @@ const indexHTML = `<!DOCTYPE html>
         .hidden {
             display: none !important;
         }
+
+        /* Kubeconfig Panel */
+        .kubeconfig-panel {
+            width: 320px;
+            background: var(--bg-secondary);
+            border-left: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+            min-height: 0;
+        }
+
+        body.kubeconfig-collapsed .kubeconfig-panel {
+            display: none;
+        }
+
+        @media (max-width: 1150px) {
+            :root {
+                --sidebar-width: 240px;
+            }
+
+            .kubeconfig-panel {
+                width: 240px;
+            }
+        }
+
+        .toolbar-btn.toggle-active {
+            box-shadow: inset 0 0 0 1px var(--accent);
+        }
+
+        .kc-header {
+            gap: 8px;
+        }
+
+        .kc-header-text {
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            flex: 1;
+        }
+
+        .kc-path {
+            font-weight: 400;
+            font-size: 11px;
+            text-transform: none;
+            letter-spacing: normal;
+            margin-top: 2px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .kc-summary {
+            padding: 8px 12px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            border-bottom: 1px solid var(--border);
+            word-break: break-all;
+        }
+
+        .kc-summary strong {
+            color: var(--text-bright);
+            font-weight: 600;
+        }
+
+        .context-list {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .context-message {
+            color: var(--text-secondary);
+            font-size: 11px;
+            font-style: italic;
+            padding: 8px 0;
+            word-break: break-word;
+        }
+
+        .context-message.error {
+            color: var(--error);
+            font-style: normal;
+        }
+
+        .context-item {
+            padding: 8px;
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+            border-left: 3px solid transparent;
+        }
+
+        .context-item:hover {
+            background: var(--bg-hover);
+        }
+
+        .context-item.current {
+            border-left-color: var(--success);
+        }
+
+        .context-name-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 6px;
+        }
+
+        .context-name {
+            flex: 1;
+            min-width: 0;
+            font-weight: 600;
+            color: var(--text-bright);
+            word-break: break-all;
+        }
+
+        .context-pill {
+            flex-shrink: 0;
+            background: var(--success);
+            color: white;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 600;
+        }
+
+        .context-meta {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-top: 3px;
+            word-break: break-all;
+        }
+
+        .context-from {
+            font-size: 11px;
+            color: var(--accent);
+            margin-top: 2px;
+            word-break: break-word;
+        }
+
+        .context-actions {
+            display: flex;
+            gap: 4px;
+            margin-top: 6px;
+        }
+
+        .context-actions .toolbar-btn {
+            padding: 2px 8px;
+            font-size: 11px;
+        }
+
+        .context-actions .context-delete {
+            color: var(--error);
+        }
     </style>
 </head>
 <body>
     <!-- Toolbar -->
     <div class="toolbar">
         <span class="toolbar-title">Kubeconfig Wrangler</span>
-        <button class="toolbar-btn toolbar-btn-secondary" onclick="showManageKubeconfigModal()">
-            ⚙ Manage Kubeconfig
+        <button class="toolbar-btn toolbar-btn-secondary" id="toggleKubeconfigBtn" onclick="toggleKubeconfigPanel()" title="Show or hide the kubeconfig panel">
+            ☰ Kubeconfig
         </button>
         <button class="toolbar-btn toolbar-btn-secondary" id="refreshBtn" onclick="fetchClusters()" disabled>
             ↻ Refresh
@@ -2766,6 +2941,23 @@ const indexHTML = `<!DOCTYPE html>
                 <div class="loading-spinner"></div>
             </div>
         </div>
+
+        <!-- Kubeconfig Panel -->
+        <aside class="kubeconfig-panel" id="kubeconfigPanel">
+            <div class="sidebar-header kc-header">
+                <div class="kc-header-text">
+                    <span>Kubeconfig</span>
+                    <span class="kc-path" id="kubeconfigPathLabel"></span>
+                </div>
+                <button class="add-btn" onclick="loadContexts()" title="Reload kubeconfig">↻</button>
+            </div>
+            <div class="kc-summary" id="kubeconfigSummary">No current context</div>
+            <div class="sidebar-content">
+                <div class="context-list" id="contextList">
+                    <div class="context-message">Loading contexts...</div>
+                </div>
+            </div>
+        </aside>
     </div>
 
     <!-- Status Bar -->
@@ -2774,6 +2966,7 @@ const indexHTML = `<!DOCTYPE html>
             <span class="status-dot" id="connectionStatus"></span>
             <span id="connectionText">Not connected</span>
         </div>
+        <div class="status-bar-item" id="contextStatus">ctx: —</div>
         <div class="status-bar-item" id="selectionStatus">
             0 selected
         </div>
@@ -2920,32 +3113,6 @@ const indexHTML = `<!DOCTYPE html>
             <div class="modal-footer">
                 <button class="toolbar-btn toolbar-btn-secondary" onclick="hideAddConnectionModal()">Cancel</button>
                 <button class="toolbar-btn" id="saveProfileBtn" onclick="saveNewProfile()">Save Connection</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Manage Kubeconfig Modal -->
-    <div class="modal-overlay" id="manageKubeconfigModal">
-        <div class="modal" style="max-width: 700px;">
-            <div class="modal-header">
-                <span class="modal-title">Manage Kubeconfig</span>
-                <button class="modal-close" onclick="hideManageKubeconfigModal()">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="form-group">
-                    <label>Kubeconfig Path</label>
-                    <input type="text" id="kubeconfigPath" readonly style="background: var(--bg-tertiary); cursor: default;">
-                </div>
-                <div class="form-group">
-                    <label>Contexts</label>
-                    <div id="contextList" style="border: 1px solid var(--border); border-radius: 4px;">
-                        <div style="padding: 20px; text-align: center; color: var(--text-secondary);">Loading contexts...</div>
-                    </div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button class="toolbar-btn toolbar-btn-secondary" onclick="loadContexts()">↻ Refresh</button>
-                <button class="toolbar-btn toolbar-btn-secondary" onclick="hideManageKubeconfigModal()">Close</button>
             </div>
         </div>
     </div>
@@ -3174,6 +3341,7 @@ const indexHTML = `<!DOCTYPE html>
                 updateSelectAll();
                 updateSelectionStatus();
                 updatePrefixPreview();
+                renderContextList();
                 return;
             }
 
@@ -3187,7 +3355,8 @@ const indexHTML = `<!DOCTYPE html>
                 const isSelected = isActive && selectedKeys.has(clusterKey(cluster));
                 // Display alias if set, otherwise fall back to the original name
                 const displayName = cluster.alias || cluster.name;
-                const localBadge = cluster.inLocalKubeconfig ? '<span class="local-config-badge">local</span>' : '';
+                const localTitle = cluster.localContext ? ' title="context: ' + escapeHtml(cluster.localContext) + '"' : '';
+                const localBadge = cluster.inLocalKubeconfig ? '<span class="local-config-badge"' + localTitle + '>local</span>' : '';
                 tr.innerHTML = ` + "`" + `
                     <td><input type="checkbox" id="cluster-${index}" ${isSelected ? 'checked' : ''} ${!isActive ? 'disabled' : ''} onchange="onClusterSelect(${index})"></td>
                     <td class="cluster-name-cell">
@@ -3209,6 +3378,7 @@ const indexHTML = `<!DOCTYPE html>
             updateSelectAll();
             updateSelectionStatus();
             updatePrefixPreview();
+            renderContextList();
         }
 
         function onClusterSelect(index) {
@@ -3275,7 +3445,9 @@ const indexHTML = `<!DOCTYPE html>
         function setKubeconfigPath(path) {
             kubeconfigPath = path || '';
             document.getElementById('mergeTargetPath').textContent = kubeconfigPath || 'your kubeconfig file';
-            document.getElementById('kubeconfigPath').value = kubeconfigPath;
+            const label = document.getElementById('kubeconfigPathLabel');
+            label.textContent = kubeconfigPath;
+            label.title = kubeconfigPath;
         }
 
         function kubeconfigLabel() {
@@ -3340,6 +3512,8 @@ const indexHTML = `<!DOCTYPE html>
 
         async function handleMergeResponse(response) {
             const result = await readJSON(response);
+            // Even a failed or partial merge may have written the file.
+            loadContexts();
             if (!result.success) {
                 let msg = 'Failed to merge: ' + errorOf(result, response);
                 showToast(msg, 'error', 10000);
@@ -3683,6 +3857,7 @@ const indexHTML = `<!DOCTYPE html>
                 showToast('Connection deleted', 'success');
                 await loadProfiles();
                 loadStatus();
+                loadContexts();
                 if (selectedProfileId === profileId || (selectedProfileId === '__all__' && profiles.length === 0)) {
                     selectedProfileId = null;
                     clearClusters();
@@ -4086,81 +4261,157 @@ const indexHTML = `<!DOCTYPE html>
             reader.readAsText(file);
         }
 
-        // ========== Kubeconfig Context Management ==========
+        // ========== Kubeconfig Panel ==========
 
         let kubeconfigContexts = [];
+        let currentContextName = '';
+        // Message shown instead of the list (null when the list is shown).
+        let contextListMessage = { text: 'Loading contexts...', error: false };
+        // Incremented per load so a slow, superseded response is ignored.
+        let contextsSeq = 0;
 
-        function showManageKubeconfigModal() {
-            document.getElementById('manageKubeconfigModal').classList.add('show');
-            loadContexts();
+        const KUBECONFIG_PANEL_KEY = 'kw.kubeconfigPanel';
+
+        function readPanelPreference() {
+            try {
+                return localStorage.getItem(KUBECONFIG_PANEL_KEY);
+            } catch (e) {
+                return null;
+            }
         }
 
-        function hideManageKubeconfigModal() {
-            document.getElementById('manageKubeconfigModal').classList.remove('show');
+        function writePanelPreference(value) {
+            try {
+                localStorage.setItem(KUBECONFIG_PANEL_KEY, value);
+            } catch (e) {
+                // Storage unavailable; the toggle still works for this session.
+            }
         }
 
-        function contextMessage(text, color) {
-            return '<div style="padding: 20px; text-align: center; color: var(' + color + ');">' + escapeHtml(text) + '</div>';
+        function setKubeconfigPanelCollapsed(collapsed) {
+            document.body.classList.toggle('kubeconfig-collapsed', collapsed);
+            const btn = document.getElementById('toggleKubeconfigBtn');
+            btn.classList.toggle('toggle-active', !collapsed);
+            btn.setAttribute('aria-pressed', collapsed ? 'false' : 'true');
+        }
+
+        function initKubeconfigPanel() {
+            const stored = readPanelPreference();
+            let collapsed;
+            if (stored === 'collapsed') {
+                collapsed = true;
+            } else if (stored === 'open') {
+                collapsed = false;
+            } else {
+                collapsed = window.innerWidth < 1100;
+            }
+            setKubeconfigPanelCollapsed(collapsed);
+        }
+
+        function toggleKubeconfigPanel() {
+            const collapsed = !document.body.classList.contains('kubeconfig-collapsed');
+            setKubeconfigPanelCollapsed(collapsed);
+            writePanelPreference(collapsed ? 'collapsed' : 'open');
+        }
+
+        function contextMessage(text, isError) {
+            return '<div class="context-message' + (isError ? ' error' : '') + '">' + escapeHtml(text) + '</div>';
+        }
+
+        function updateContextSummary() {
+            const summary = document.getElementById('kubeconfigSummary');
+            summary.innerHTML = currentContextName
+                ? 'Current: <strong>' + escapeHtml(currentContextName) + '</strong>'
+                : 'No current context';
+            const status = document.getElementById('contextStatus');
+            status.innerHTML = 'ctx: ' + escapeHtml(currentContextName || '—');
+            status.title = kubeconfigPath ? 'Current context in ' + kubeconfigPath : 'Current kubeconfig context';
         }
 
         async function loadContexts() {
-            const contextList = document.getElementById('contextList');
-            contextList.innerHTML = contextMessage('Loading contexts...', '--text-secondary');
-            document.getElementById('kubeconfigPath').value = kubeconfigPath;
+            const seq = ++contextsSeq;
+            if (kubeconfigContexts.length === 0) {
+                contextListMessage = { text: 'Loading contexts...', error: false };
+                renderContextList();
+            }
 
             try {
-                // Get kubeconfig path
-                const pathResponse = await authFetch('/api/context');
-                const pathResult = await readJSON(pathResponse);
-                if (pathResult.success && pathResult.data && pathResult.data.kubeconfigPath) {
+                const [pathResponse, response] = await Promise.all([
+                    authFetch('/api/context'),
+                    authFetch('/api/contexts')
+                ]);
+                const [pathResult, result] = await Promise.all([readJSON(pathResponse), readJSON(response)]);
+                if (seq !== contextsSeq) return;
+
+                // GET /api/context fails when the file does not exist, while
+                // /api/contexts then succeeds with an empty list.
+                const pathOk = pathResult.success && pathResult.data;
+                if (pathOk && pathResult.data.kubeconfigPath) {
                     setKubeconfigPath(pathResult.data.kubeconfigPath);
                 }
-
-                // Get contexts list
-                const response = await authFetch('/api/contexts');
-                const result = await readJSON(response);
+                currentContextName = pathOk ? (pathResult.data.currentContext || '') : '';
 
                 if (!result.success) {
-                    contextList.innerHTML = contextMessage('Failed to load contexts: ' + errorOf(result, response), '--error');
-                    return;
+                    kubeconfigContexts = [];
+                    contextListMessage = { text: 'Failed to load contexts: ' + errorOf(result, response), error: true };
+                } else {
+                    kubeconfigContexts = Array.isArray(result.data) ? result.data : [];
+                    const current = kubeconfigContexts.find(c => c.isCurrent);
+                    if (current) currentContextName = current.name;
+                    if (kubeconfigContexts.length === 0) {
+                        contextListMessage = { text: pathOk ? 'No contexts' : 'No kubeconfig file yet', error: false };
+                    } else {
+                        contextListMessage = null;
+                    }
                 }
-
-                kubeconfigContexts = result.data || [];
-
-                if (kubeconfigContexts.length === 0) {
-                    contextList.innerHTML = contextMessage('No contexts found in kubeconfig', '--text-secondary');
-                    return;
-                }
-
-                renderContextList();
             } catch (error) {
-                contextList.innerHTML = contextMessage('Error: ' + error.message, '--error');
+                if (seq !== contextsSeq) return;
+                kubeconfigContexts = [];
+                currentContextName = '';
+                contextListMessage = { text: 'Error: ' + error.message, error: true };
             }
+            renderContextList();
+            updateContextSummary();
+        }
+
+        // Names of the connections whose loaded clusters match a context, as
+        // far as the client can tell (exact name or alias match).
+        function contextSources(ctx) {
+            const names = new Set();
+            clusters.forEach(c => {
+                if (!c.inLocalKubeconfig || !c.profileName) return;
+                if (ctx.name === c.localContext || ctx.name === (c.alias || c.name) || ctx.name === c.name) {
+                    names.add(c.profileName);
+                }
+            });
+            return Array.from(names);
         }
 
         function renderContextList() {
             const contextList = document.getElementById('contextList');
-            const btnStyle = 'padding: 4px 8px; font-size: 11px;';
-            contextList.innerHTML = kubeconfigContexts.map((ctx, i) => ` + "`" + `
-                <div style="display: flex; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--border); gap: 10px;">
-                    <div style="flex: 1; min-width: 0;">
-                        <div style="display: flex; align-items: center; gap: 8px;">
-                            <span style="font-weight: 500; color: var(--text-bright); word-break: break-all;">${escapeHtml(ctx.name)}</span>
-                            ${ctx.isCurrent ? '<span style="background: var(--success); color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: 600;">CURRENT</span>' : ''}
-                        </div>
-                        <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">
-                            <span title="Cluster">📦 ${escapeHtml(ctx.cluster)}</span>
-                            <span style="margin-left: 12px;" title="User">👤 ${escapeHtml(ctx.user)}</span>
-                            ${ctx.namespace ? '<span style="margin-left: 12px;" title="Namespace">📁 ' + escapeHtml(ctx.namespace) + '</span>' : ''}
-                        </div>
+            if (contextListMessage) {
+                contextList.innerHTML = contextMessage(contextListMessage.text, contextListMessage.error);
+                return;
+            }
+            contextList.innerHTML = kubeconfigContexts.map((ctx, i) => {
+                const meta = [ctx.cluster, ctx.user, ctx.namespace].filter(v => v).map(escapeHtml).join(' / ');
+                const sources = contextSources(ctx);
+                return ` + "`" + `
+                <div class="context-item${ctx.isCurrent ? ' current' : ''}">
+                    <div class="context-name-row">
+                        <span class="context-name">${escapeHtml(ctx.name)}</span>
+                        ${ctx.isCurrent ? '<span class="context-pill">CURRENT</span>' : ''}
                     </div>
-                    <div style="display: flex; gap: 4px; flex-shrink: 0;">
-                        ${!ctx.isCurrent ? '<button data-action="use" data-idx="' + i + '" class="toolbar-btn toolbar-btn-secondary" style="' + btnStyle + '" title="Set as current">✓ Use</button>' : ''}
-                        <button data-action="rename" data-idx="${i}" class="toolbar-btn toolbar-btn-secondary" style="${btnStyle}" title="Rename">✏️</button>
-                        <button data-action="delete" data-idx="${i}" class="toolbar-btn toolbar-btn-secondary" style="${btnStyle} color: var(--error);" title="Delete">🗑️</button>
+                    ${meta ? '<div class="context-meta" title="cluster / user / namespace">' + meta + '</div>' : ''}
+                    ${sources.length ? '<div class="context-from">from ' + escapeHtml(sources.join(', ')) + '</div>' : ''}
+                    <div class="context-actions">
+                        ${!ctx.isCurrent ? '<button data-action="use" data-idx="' + i + '" class="toolbar-btn toolbar-btn-secondary" title="Set as current context">Use</button>' : ''}
+                        <button data-action="rename" data-idx="${i}" class="toolbar-btn toolbar-btn-secondary" title="Rename">✏️</button>
+                        <button data-action="delete" data-idx="${i}" class="toolbar-btn toolbar-btn-secondary context-delete" title="Delete">🗑️</button>
                     </div>
                 </div>
-            ` + "`" + `).join('');
+            ` + "`" + `;
+            }).join('');
         }
 
         function onContextListClick(event) {
@@ -4175,6 +4426,13 @@ const indexHTML = `<!DOCTYPE html>
             }
         }
 
+        // Reloads the panel and the cluster list (whose "local" badges
+        // depend on the kubeconfig) after a context change.
+        function refreshAfterContextChange() {
+            loadContexts();
+            fetchClusters();
+        }
+
         async function setCurrentContext(name) {
             try {
                 const response = await authFetch('/api/context', {
@@ -4185,7 +4443,7 @@ const indexHTML = `<!DOCTYPE html>
                 const result = await readJSON(response);
                 if (result.success) {
                     showToast('Switched to context: ' + name, 'success');
-                    loadContexts();
+                    refreshAfterContextChange();
                 } else {
                     showToast('Failed to switch context: ' + errorOf(result, response), 'error');
                 }
@@ -4208,7 +4466,7 @@ const indexHTML = `<!DOCTYPE html>
                 const result = await readJSON(response);
                 if (result.success) {
                     showToast('Context deleted: ' + name, 'success');
-                    loadContexts();
+                    refreshAfterContextChange();
                 } else {
                     showToast('Failed to delete context: ' + errorOf(result, response), 'error');
                 }
@@ -4252,7 +4510,7 @@ const indexHTML = `<!DOCTYPE html>
                 if (result.success) {
                     showToast('Context renamed: ' + oldName + ' → ' + newName, 'success');
                     hideRenameContextModal();
-                    loadContexts();
+                    refreshAfterContextChange();
                 } else {
                     showToast('Failed to rename: ' + errorOf(result, response), 'error');
                 }
@@ -4337,7 +4595,9 @@ const indexHTML = `<!DOCTYPE html>
         document.addEventListener('DOMContentLoaded', async () => {
             document.getElementById('profileList').addEventListener('click', onProfileListClick);
             document.getElementById('contextList').addEventListener('click', onContextListClick);
+            initKubeconfigPanel();
             await loadStatus();
+            loadContexts();
             await loadProfiles();
         });
     </script>

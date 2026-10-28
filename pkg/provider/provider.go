@@ -32,6 +32,10 @@ type ClusterInfo struct {
 
 	// InLocalKubeconfig indicates whether this cluster already exists in the user's ~/.kube/config
 	InLocalKubeconfig bool `json:"inLocalKubeconfig"`
+
+	// LocalContext is the name of the context in the user's kubeconfig that
+	// this cluster corresponds to (set together with InLocalKubeconfig)
+	LocalContext string `json:"localContext,omitempty"`
 }
 
 // ClusterProvider is the interface that all cluster providers must implement

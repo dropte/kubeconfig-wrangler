@@ -394,7 +394,7 @@ async function onActivate() {
 // Create the main window
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1000,
+    width: 1240,
     height: 800,
     minWidth: 800,
     minHeight: 600,
