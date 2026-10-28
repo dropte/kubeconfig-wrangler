@@ -2,7 +2,11 @@
 package profile
 
 import (
+	"maps"
+	"strings"
 	"time"
+
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 // ProfileType represents the type of cluster provider
@@ -15,6 +19,23 @@ const (
 	ProfileTypeEKS ProfileType = "eks"
 	// ProfileTypeStatic represents a manually entered kubeconfig
 	ProfileTypeStatic ProfileType = "static"
+	// ProfileTypeOKE represents an Oracle Cloud (OKE) connection profile
+	ProfileTypeOKE ProfileType = "oke"
+)
+
+// OCI authentication modes for OKE profiles.
+const (
+	// OCIAuthAPIKey signs requests with the API key from the OCI config profile.
+	OCIAuthAPIKey = "api_key"
+	// OCIAuthSecurityToken uses a session token created by "oci session authenticate".
+	OCIAuthSecurityToken = "security_token"
+)
+
+// OKE kubeconfig endpoint kinds (which control-plane endpoint the kubeconfig targets).
+const (
+	OKEEndpointPublic      = "public"
+	OKEEndpointPrivate     = "private"
+	OKEEndpointVCNHostname = "vcn_hostname"
 )
 
 // Profile represents a saved connection configuration
@@ -76,6 +97,29 @@ type Profile struct {
 	// Kubeconfig is the raw kubeconfig content (stored encrypted)
 	Kubeconfig string `json:"kubeconfig,omitempty"`
 
+	// OKE (Oracle Cloud) fields. No secrets are stored: authentication always
+	// goes through a profile in the OCI config file.
+
+	// OCIProfile is the profile name in the OCI config file (default DEFAULT)
+	OCIProfile string `json:"ociProfile,omitempty"`
+
+	// OCIConfigFile overrides the OCI config file path (default ~/.oci/config)
+	OCIConfigFile string `json:"ociConfigFile,omitempty"`
+
+	// OCIRegion overrides the region from the OCI profile (optional)
+	OCIRegion string `json:"ociRegion,omitempty"`
+
+	// OCICompartment restricts discovery to one compartment OCID; empty means
+	// every active compartment in the tenancy
+	OCICompartment string `json:"ociCompartment,omitempty"`
+
+	// OCIAuth is the OCI auth mode: OCIAuthAPIKey (default) or OCIAuthSecurityToken
+	OCIAuth string `json:"ociAuth,omitempty"`
+
+	// OKEEndpoint selects the cluster endpoint written into kubeconfigs:
+	// OKEEndpointPublic (default), OKEEndpointPrivate or OKEEndpointVCNHostname
+	OKEEndpoint string `json:"okeEndpoint,omitempty"`
+
 	// ClusterAliases maps cluster IDs to user-defined friendly names
 	// The alias is used instead of the original cluster name in generated kubeconfigs
 	ClusterAliases map[string]string `json:"clusterAliases,omitempty"`
@@ -83,6 +127,93 @@ type Profile struct {
 	// ExportedContexts maps cluster IDs to the context name used when merging to ~/.kube/config
 	// This tracks which clusters have been exported and with what context name
 	ExportedContexts map[string]string `json:"exportedContexts,omitempty"`
+
+	// Locked is set (in memory only) on profiles whose secrets could not be
+	// decrypted. Their secret fields are blank; re-entering them via Update
+	// unlocks the profile.
+	Locked bool `json:"-"`
+}
+
+// clone returns a deep copy of p so callers never share the store's maps.
+func (p *Profile) clone() *Profile {
+	cp := *p
+	cp.ClusterAliases = maps.Clone(p.ClusterAliases)
+	cp.ExportedContexts = maps.Clone(p.ExportedContexts)
+	return &cp
+}
+
+// hasSecrets reports whether any secret (encrypted) field is set.
+func hasSecrets(p *Profile) bool {
+	return p.Token != "" || p.Password != "" || p.SecretKey != "" ||
+		p.SessionToken != "" || p.Kubeconfig != ""
+}
+
+// ProfileView is the secret-free representation of a profile sent to clients.
+type ProfileView struct {
+	Id                 string            `json:"id"`
+	Name               string            `json:"name"`
+	Type               ProfileType       `json:"type"`
+	CreatedAt          time.Time         `json:"createdAt"`
+	UpdatedAt          time.Time         `json:"updatedAt"`
+	RancherURL         string            `json:"rancherUrl,omitempty"`
+	Username           string            `json:"username,omitempty"`
+	SkipTLS            bool              `json:"skipTls"`
+	CACert             string            `json:"caCert,omitempty"`
+	AWSProfile         string            `json:"awsProfile,omitempty"`
+	AWSRegion          string            `json:"awsRegion,omitempty"`
+	AccessKey          string            `json:"accessKey,omitempty"`
+	OCIProfile         string            `json:"ociProfile,omitempty"`
+	OCIConfigFile      string            `json:"ociConfigFile,omitempty"`
+	OCIRegion          string            `json:"ociRegion,omitempty"`
+	OCICompartment     string            `json:"ociCompartment,omitempty"`
+	OCIAuth            string            `json:"ociAuth,omitempty"`
+	OKEEndpoint        string            `json:"okeEndpoint,omitempty"`
+	ClusterAliases     map[string]string `json:"clusterAliases,omitempty"`
+	HasToken           bool              `json:"hasToken"`
+	HasPassword        bool              `json:"hasPassword"`
+	HasSecretKey       bool              `json:"hasSecretKey"`
+	HasSessionToken    bool              `json:"hasSessionToken"`
+	HasKubeconfig      bool              `json:"hasKubeconfig"`
+	KubeconfigContexts int               `json:"kubeconfigContexts"`
+	Locked             bool              `json:"locked"`
+}
+
+// View returns the client-facing view of p with all secrets replaced by
+// presence flags.
+func (p *Profile) View() ProfileView {
+	v := ProfileView{
+		Id:              p.ID,
+		Name:            p.Name,
+		Type:            p.Type,
+		CreatedAt:       p.CreatedAt,
+		UpdatedAt:       p.UpdatedAt,
+		RancherURL:      p.RancherURL,
+		Username:        p.Username,
+		SkipTLS:         p.SkipTLS,
+		CACert:          p.CACert,
+		AWSProfile:      p.AWSProfile,
+		AWSRegion:       p.AWSRegion,
+		AccessKey:       p.AccessKey,
+		OCIProfile:      p.OCIProfile,
+		OCIConfigFile:   p.OCIConfigFile,
+		OCIRegion:       p.OCIRegion,
+		OCICompartment:  p.OCICompartment,
+		OCIAuth:         p.OCIAuth,
+		OKEEndpoint:     p.OKEEndpoint,
+		ClusterAliases:  maps.Clone(p.ClusterAliases),
+		HasToken:        p.Token != "",
+		HasPassword:     p.Password != "",
+		HasSecretKey:    p.SecretKey != "",
+		HasSessionToken: p.SessionToken != "",
+		HasKubeconfig:   p.Kubeconfig != "",
+		Locked:          p.Locked,
+	}
+	if p.Kubeconfig != "" {
+		if cfg, err := clientcmd.Load([]byte(p.Kubeconfig)); err == nil {
+			v.KubeconfigContexts = len(cfg.Contexts)
+		}
+	}
+	return v
 }
 
 // IsRancher returns true if this is a Rancher profile
@@ -98,6 +229,11 @@ func (p *Profile) IsEKS() bool {
 // IsStatic returns true if this is a static kubeconfig profile
 func (p *Profile) IsStatic() bool {
 	return p.Type == ProfileTypeStatic
+}
+
+// IsOKE returns true if this is an Oracle Cloud (OKE) profile
+func (p *Profile) IsOKE() bool {
+	return p.Type == ProfileTypeOKE
 }
 
 // UsesAWSProfile returns true if this EKS profile uses an AWS CLI profile
@@ -123,6 +259,8 @@ func (p *Profile) Validate() error {
 		return p.validateEKS()
 	case ProfileTypeStatic:
 		return p.validateStatic()
+	case ProfileTypeOKE:
+		return p.validateOKE()
 	default:
 		return &ValidationError{Field: "type", Message: "invalid profile type"}
 	}
@@ -165,6 +303,23 @@ func (p *Profile) validateStatic() error {
 	return nil
 }
 
+func (p *Profile) validateOKE() error {
+	switch p.OCIAuth {
+	case "", OCIAuthAPIKey, OCIAuthSecurityToken:
+	default:
+		return &ValidationError{Field: "ociAuth", Message: "OCI auth must be api_key or security_token"}
+	}
+	switch p.OKEEndpoint {
+	case "", OKEEndpointPublic, OKEEndpointPrivate, OKEEndpointVCNHostname:
+	default:
+		return &ValidationError{Field: "okeEndpoint", Message: "OKE endpoint must be public, private or vcn_hostname"}
+	}
+	if p.OCICompartment != "" && !strings.HasPrefix(p.OCICompartment, "ocid1.") {
+		return &ValidationError{Field: "ociCompartment", Message: "compartment must be an OCID (ocid1....)"}
+	}
+	return nil
+}
+
 // ValidationError represents a profile validation error
 type ValidationError struct {
 	Field   string
@@ -198,13 +353,27 @@ type ProfileCreateRequest struct {
 	// Static kubeconfig fields
 	Kubeconfig string `json:"kubeconfig,omitempty"`
 
+	// OKE fields
+	OCIProfile     string `json:"ociProfile,omitempty"`
+	OCIConfigFile  string `json:"ociConfigFile,omitempty"`
+	OCIRegion      string `json:"ociRegion,omitempty"`
+	OCICompartment string `json:"ociCompartment,omitempty"`
+	OCIAuth        string `json:"ociAuth,omitempty"`
+	OKEEndpoint    string `json:"okeEndpoint,omitempty"`
+
 	// ClusterAliases maps cluster IDs to user-defined friendly names
 	ClusterAliases map[string]string `json:"clusterAliases,omitempty"`
 }
 
-// ToProfile converts a create request to a Profile
+// ToProfile converts a create request to a Profile. Fields that do not
+// belong to the requested type are dropped so, for example, an OKE profile
+// (which authenticates only through the OCI config file) never stores
+// secrets a client sent by mistake.
 func (r *ProfileCreateRequest) ToProfile(id string) *Profile {
 	now := time.Now()
+	if r.Type == ProfileTypeOKE {
+		r.Token, r.Password, r.SecretKey, r.SessionToken, r.Kubeconfig = "", "", "", "", ""
+	}
 	return &Profile{
 		ID:             id,
 		Name:           r.Name,
@@ -223,6 +392,12 @@ func (r *ProfileCreateRequest) ToProfile(id string) *Profile {
 		SecretKey:      r.SecretKey,
 		SessionToken:   r.SessionToken,
 		Kubeconfig:     r.Kubeconfig,
+		OCIProfile:     strings.TrimSpace(r.OCIProfile),
+		OCIConfigFile:  strings.TrimSpace(r.OCIConfigFile),
+		OCIRegion:      strings.TrimSpace(r.OCIRegion),
+		OCICompartment: strings.TrimSpace(r.OCICompartment),
+		OCIAuth:        r.OCIAuth,
+		OKEEndpoint:    r.OKEEndpoint,
 		ClusterAliases: r.ClusterAliases,
 	}
 }

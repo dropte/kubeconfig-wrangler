@@ -7,51 +7,104 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (e.g., v0.1.3)'
+        description: 'Existing tag to release (e.g., v0.1.3)'
         required: true
 
 permissions:
   contents: write
 
 jobs:
-  create-release:
-    name: Create Release
+  # Resolves the tag once, and builds/tests that exact tag before anything is
+  # published. Every other job depends on this one.
+  verify:
+    name: Verify
     runs-on: ubuntu-latest
     outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      version: ${{ steps.get_version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Get version from tag
-        id: get_version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
+      - name: Resolve tag and version
+        id: version
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$TAG' is not a semver tag of the form vX.Y.Z"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
         with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref_name }}
+          ref: ${{ steps.version.outputs.tag }}
+
+      # Re-running on a tag whose release is already published would replace
+      # its notes, overwrite the CLI assets and make electron-builder skip its
+      # uploads (it will not touch a published release), leaving a mixed
+      # release behind a green run. Only a missing or draft release is allowed.
+      - name: Refuse an already-published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if is_draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null) && [ "$is_draft" = "false" ]; then
+            echo "::error::Release $TAG is already published; delete it or use a new tag"
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Check Electron sources
+        working-directory: electron
+        run: |
+          node --check main.js
+          node --check preload.js
+
+  create-release:
+    name: Create Draft Release
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify.outputs.tag }}
+          name: Release ${{ needs.verify.outputs.tag }}
           draft: true
           prerelease: false
           body: |
-            ## Kubeconfig Wrangler ${{ github.ref_name }}
+            ## Kubeconfig Wrangler ${{ needs.verify.outputs.tag }}
 
             ### Downloads
 
             #### CLI Binaries
             - **Linux (amd64)**: `kubeconfig-wrangler-linux-amd64`
             - **Linux (arm64)**: `kubeconfig-wrangler-linux-arm64`
-            - **macOS (amd64)**: `kubeconfig-wrangler-darwin-amd64`
-            - **macOS (arm64)**: `kubeconfig-wrangler-darwin-arm64`
+            - **macOS (Intel)**: `kubeconfig-wrangler-darwin-amd64`
+            - **macOS (Apple Silicon)**: `kubeconfig-wrangler-darwin-arm64`
             - **Windows (amd64)**: `kubeconfig-wrangler-windows-amd64.exe`
 
             #### Desktop Application (Electron)
             - **Linux**: AppImage, .deb, .rpm
-            - **macOS**: .dmg
+            - **macOS**: .dmg / .zip for Apple Silicon (arm64) and Intel (x64), signed and notarized
             - **Windows**: .exe installer
 
             ### Changelog
@@ -60,7 +113,7 @@ jobs:
   build-cli:
     name: Build CLI
     runs-on: ubuntu-latest
-    needs: create-release
+    needs: verify
     strategy:
       matrix:
         goos: [linux, windows]
@@ -69,40 +122,40 @@ jobs:
           - goos: windows
             goarch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
 
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.verify.outputs.version }}
         run: |
           mkdir -p bin
           EXT=""
           if [ "$GOOS" = "windows" ]; then
             EXT=".exe"
           fi
-          go build -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ needs.create-release.outputs.version }}" \
-            -o bin/kubeconfig-wrangler-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} .
+          go build -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${VERSION}" \
+            -o "bin/kubeconfig-wrangler-${GOOS}-${GOARCH}${EXT}" .
 
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: bin/kubeconfig-wrangler-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
-          asset_name: kubeconfig-wrangler-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
-          asset_content_type: application/octet-stream
+          name: cli-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: bin/kubeconfig-wrangler-*
+          if-no-files-found: error
 
   build-cli-macos:
     name: Build CLI (macOS)
     runs-on: macos-latest
-    needs: create-release
+    needs: verify
     env:
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -113,99 +166,136 @@ jobs:
       matrix:
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
+      # A release must never ship unsigned or unnotarized macOS binaries,
+      # matching the Electron macOS job. ci.yml does not sign, so pull
+      # requests and forks are unaffected.
+      - name: Check signing secrets
+        run: |
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_ID_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!v}" ]; then
+              echo "::error::$v secret is required for release"
+              exit 1
+            fi
+          done
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
 
+      - name: Build
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          mkdir -p bin
+          go build -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${VERSION}" \
+            -o "bin/kubeconfig-wrangler-darwin-${GOARCH}" .
+
+      # The secrets were checked above, so signing and notarization always run.
       - name: Import Code Signing Certificate
-        if: ${{ env.APPLE_CERTIFICATE != '' }}
         run: |
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
-          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          rm -f "$RUNNER_TEMP/certificate.p12"
           security list-keychain -d user -s "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          # Find the signing identity
           IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
-          echo "SIGNING_IDENTITY=$IDENTITY" >> $GITHUB_ENV
-
-      - name: Build
-        env:
-          GOOS: darwin
-          GOARCH: ${{ matrix.goarch }}
-        run: |
-          mkdir -p bin
-          go build -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ needs.create-release.outputs.version }}" \
-            -o bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }} .
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No Developer ID Application identity found in APPLE_CERTIFICATE"
+            exit 1
+          fi
+          echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
       - name: Sign Binary
-        if: ${{ env.SIGNING_IDENTITY != '' }}
         run: |
-          codesign --force --options runtime --sign "$SIGNING_IDENTITY" \
-            bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }}
-          codesign --verify --verbose bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }}
+          BIN="bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }}"
+          codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$BIN"
+          codesign --verify --verbose "$BIN"
 
       - name: Notarize Binary
-        if: ${{ env.APPLE_ID != '' && env.SIGNING_IDENTITY != '' }}
         run: |
-          # Zip the binary for notarization
           cd bin
-          zip kubeconfig-wrangler-darwin-${{ matrix.goarch }}.zip kubeconfig-wrangler-darwin-${{ matrix.goarch }}
-
-          # Submit for notarization
-          xcrun notarytool submit kubeconfig-wrangler-darwin-${{ matrix.goarch }}.zip \
+          NAME="kubeconfig-wrangler-darwin-${{ matrix.goarch }}"
+          zip "$NAME.zip" "$NAME"
+          xcrun notarytool submit "$NAME.zip" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_ID_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
-            --wait || echo "Notarization failed, continuing..."
+            --wait
+          rm "$NAME.zip"
 
-          # Remove the zip
-          rm kubeconfig-wrangler-darwin-${{ matrix.goarch }}.zip
-
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }}
-          asset_name: kubeconfig-wrangler-darwin-${{ matrix.goarch }}
-          asset_content_type: application/octet-stream
+          name: cli-darwin-${{ matrix.goarch }}
+          path: bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }}
+          if-no-files-found: error
+
+  publish-cli:
+    name: Attach CLI Binaries
+    runs-on: ubuntu-latest
+    needs: [verify, create-release, build-cli, build-cli-macos]
+    steps:
+      - name: Download CLI artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: cli-*
+          path: dist
+          merge-multiple: true
+
+      - name: Upload to draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify.outputs.tag }}
+          draft: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/kubeconfig-wrangler-*
 
   build-electron-linux:
     name: Build Electron (Linux)
     runs-on: ubuntu-latest
-    needs: create-release
+    needs: [verify, create-release]
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: electron/package-lock.json
 
       - name: Build Go backend
         run: |
           mkdir -p bin/linux
           GOOS=linux GOARCH=amd64 go build \
-            -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ needs.create-release.outputs.version }}" \
+            -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${VERSION}" \
             -o bin/linux/kubeconfig-wrangler .
 
       - name: Update package.json version
         working-directory: electron
-        run: npm version ${{ needs.create-release.outputs.version }} --no-git-tag-version
+        run: npm version "$VERSION" --no-git-tag-version --allow-same-version
 
       - name: Install Electron dependencies
         working-directory: electron
@@ -217,184 +307,107 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # electron-builder signs, notarizes (mac.notarize), staples and publishes the
+  # dmg/zip/blockmap files and latest-mac.yml for both arm64 and x64 in one run.
   build-electron-macos:
     name: Build Electron (macOS)
     runs-on: macos-latest
-    needs: create-release
+    needs: [verify, create-release]
     env:
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      VERSION: ${{ needs.verify.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: electron/package-lock.json
 
-      - name: Build Go backend
+      # Both the arm64 and x64 apps bundle bin/mac, so it must be universal.
+      - name: Build Go backend (universal)
         run: |
-          mkdir -p bin/mac
-          GOOS=darwin GOARCH=arm64 go build \
-            -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ needs.create-release.outputs.version }}" \
-            -o bin/mac/kubeconfig-wrangler .
+          mkdir -p bin/mac bin/darwin-amd64 bin/darwin-arm64
+          for arch in amd64 arm64; do
+            GOOS=darwin GOARCH=$arch go build \
+              -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${VERSION}" \
+              -o bin/darwin-$arch/kubeconfig-wrangler .
+          done
+          lipo -create -output bin/mac/kubeconfig-wrangler \
+            bin/darwin-amd64/kubeconfig-wrangler bin/darwin-arm64/kubeconfig-wrangler
+          lipo -info bin/mac/kubeconfig-wrangler
 
       - name: Update package.json version
         working-directory: electron
-        run: npm version ${{ needs.create-release.outputs.version }} --no-git-tag-version
-
-      - name: Import Code Signing Certificate
-        if: ${{ env.APPLE_CERTIFICATE != '' }}
-        run: |
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
-          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        run: npm version "$VERSION" --no-git-tag-version --allow-same-version
 
       - name: Install Electron dependencies
         working-directory: electron
         run: npm ci
 
-      - name: Build Electron app
+      - name: Build, sign, notarize and publish Electron app
         working-directory: electron
-        run: npm run build:mac
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-
-      - name: Notarize DMG
-        if: ${{ env.APPLE_ID != '' && env.APPLE_CERTIFICATE != '' }}
-        working-directory: electron
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          DMG_PATH=$(find dist -name "*.dmg" -type f | head -1)
-          if [ -n "$DMG_PATH" ]; then
-            echo "Notarizing $DMG_PATH..."
-            xcrun notarytool submit "$DMG_PATH" \
-              --apple-id "$APPLE_ID" \
-              --password "$APPLE_ID_PASSWORD" \
-              --team-id "$APPLE_TEAM_ID" \
-              --wait || echo "Notarization failed, continuing..."
-            xcrun stapler staple "$DMG_PATH" || echo "Stapling failed, continuing..."
-          fi
-
-      - name: Generate latest-mac.yml for auto-updater
-        working-directory: electron
-        run: |
-          DMG_PATH=$(find dist -name "*.dmg" -type f | head -1)
-          ZIP_PATH=$(find dist -name "*-mac.zip" -type f | head -1)
-          VERSION=${{ needs.create-release.outputs.version }}
-
-          if [ -n "$ZIP_PATH" ]; then
-            ZIP_NAME=$(basename "$ZIP_PATH")
-            ZIP_SHA512=$(shasum -a 512 "$ZIP_PATH" | awk '{print $1}' | xxd -r -p | base64)
-            ZIP_SIZE=$(stat -f%z "$ZIP_PATH")
-
-            # Start with ZIP as primary (required for auto-update)
-            cat > dist/latest-mac.yml << EOF
-          version: ${VERSION}
-          files:
-            - url: ${ZIP_NAME}
-              sha512: ${ZIP_SHA512}
-              size: ${ZIP_SIZE}
-          EOF
-
-            # Add DMG as secondary option if it exists
-            if [ -n "$DMG_PATH" ]; then
-              DMG_NAME=$(basename "$DMG_PATH")
-              DMG_SHA512=$(shasum -a 512 "$DMG_PATH" | awk '{print $1}' | xxd -r -p | base64)
-              DMG_SIZE=$(stat -f%z "$DMG_PATH")
-              cat >> dist/latest-mac.yml << EOF
-            - url: ${DMG_NAME}
-              sha512: ${DMG_SHA512}
-              size: ${DMG_SIZE}
-          EOF
+          # electron-builder silently skips notarization when the Apple
+          # variables are empty; a release must never ship unsigned.
+          for v in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!v}" ]; then
+              echo "::error::$v is not set; configure the Apple signing secrets"
+              exit 1
             fi
-
-            # ZIP is the primary path for auto-updates
-            cat >> dist/latest-mac.yml << EOF
-          path: ${ZIP_NAME}
-          sha512: ${ZIP_SHA512}
-          releaseDate: $(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-          EOF
-            echo "Generated latest-mac.yml:"
-            cat dist/latest-mac.yml
-          fi
-
-      - name: Upload ZIP to Release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: electron/dist/Kubeconfig Wrangler-${{ needs.create-release.outputs.version }}-arm64-mac.zip
-          asset_name: Kubeconfig-Wrangler-${{ needs.create-release.outputs.version }}-arm64-mac.zip
-          asset_content_type: application/zip
-        continue-on-error: true
-
-      - name: Upload DMG to Release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: electron/dist/Kubeconfig Wrangler-${{ needs.create-release.outputs.version }}.dmg
-          asset_name: Kubeconfig-Wrangler-${{ needs.create-release.outputs.version }}.dmg
-          asset_content_type: application/octet-stream
-        continue-on-error: true
-
-      - name: Upload latest-mac.yml for auto-updater
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: electron/dist/latest-mac.yml
-          asset_name: latest-mac.yml
-          asset_content_type: text/yaml
-        continue-on-error: true
+          done
+          npm run build:mac -- --publish always
 
   build-electron-windows:
     name: Build Electron (Windows)
     runs-on: windows-latest
-    needs: create-release
+    needs: [verify, create-release]
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: electron/package-lock.json
 
       - name: Build Go backend
         shell: bash
         run: |
           mkdir -p bin/win
           GOOS=windows GOARCH=amd64 go build \
-            -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ needs.create-release.outputs.version }}" \
+            -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${VERSION}" \
             -o bin/win/kubeconfig-wrangler.exe .
 
       - name: Update package.json version
         working-directory: electron
-        run: npm version ${{ needs.create-release.outputs.version }} --no-git-tag-version
+        shell: bash
+        run: npm version "$VERSION" --no-git-tag-version --allow-same-version
 
       - name: Install Electron dependencies
         working-directory: electron

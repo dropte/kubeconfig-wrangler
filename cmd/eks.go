@@ -1,11 +1,15 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/spf13/cobra"
 
 	"github.com/kubeconfig-wrangler/pkg/kubeconfig"
@@ -32,6 +36,14 @@ Authentication can be provided via:
   - AWS CLI profile (--profile or AWS_PROFILE)
   - Direct credentials (--access-key/--secret-key or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)
   - Default credentials (environment, instance profile, etc.)
+
+Credentials come from exactly one source, in this order: --access-key/--secret-key
+(with --session-token), then --profile or AWS_PROFILE, then the AWS_* key
+environment variables. Direct credentials are embedded in plain text in the
+generated kubeconfig; prefer a profile where possible.
+
+The region comes from --region, AWS_REGION/AWS_DEFAULT_REGION, or the region
+configured for the AWS profile.
 
 Examples:
   # List EKS clusters in a specific region
@@ -94,8 +106,9 @@ Examples:
 var eksProfilesCmd = &cobra.Command{
 	Use:   "profiles",
 	Short: "List available AWS CLI profiles",
-	Long:  `List all AWS CLI profiles configured in ~/.aws/credentials and ~/.aws/config.`,
-	RunE:  runEKSProfiles,
+	Long: `List all AWS CLI profiles configured in ~/.aws/credentials and ~/.aws/config
+(or the files named by AWS_SHARED_CREDENTIALS_FILE and AWS_CONFIG_FILE).`,
+	RunE: runEKSProfiles,
 }
 
 // eksRegionsCmd lists common AWS regions
@@ -125,46 +138,99 @@ func init() {
 	eksCmd.AddCommand(eksRegionsCmd)
 }
 
-func getEKSConfigFromFlags() provider.EKSConfig {
+// eksFlagValues holds the raw EKS credential and region flags.
+type eksFlagValues struct {
+	region, profile, accessKey, secretKey, sessionToken string
+}
+
+// resolveEKSCredentials builds the EKS configuration, taking credentials from
+// exactly one source: key flags (session token only from --session-token),
+// else a profile (--profile or AWS_PROFILE) with no static keys, else the
+// AWS_* key environment variables together with AWS_SESSION_TOKEN.
+// The region is taken from the flag or environment; it may still be empty.
+func resolveEKSCredentials(f eksFlagValues, getenv func(string) string) (provider.EKSConfig, error) {
 	cfg := provider.EKSConfig{
 		ProfileID:   "cli",
 		ProfileName: "CLI",
-		Region:      eksRegion,
-		AWSProfile:  eksProfile,
-		AccessKey:   eksAccessKey,
-		SecretKey:   eksSecretKey,
+		Region:      f.region,
+	}
+	if cfg.Region == "" {
+		cfg.Region = getenv("AWS_REGION")
+	}
+	if cfg.Region == "" {
+		cfg.Region = getenv("AWS_DEFAULT_REGION")
 	}
 
-	// Load from environment if not specified via flags
-	if cfg.Region == "" {
-		cfg.Region = os.Getenv("AWS_REGION")
-		if cfg.Region == "" {
-			cfg.Region = os.Getenv("AWS_DEFAULT_REGION")
+	keyFlags := f.accessKey != "" || f.secretKey != ""
+	switch {
+	case f.profile != "" && keyFlags:
+		return cfg, errors.New("--profile cannot be combined with --access-key/--secret-key; use one credential source")
+	case keyFlags:
+		if f.accessKey == "" || f.secretKey == "" {
+			return cfg, errors.New("--access-key and --secret-key must be given together")
+		}
+		cfg.AccessKey, cfg.SecretKey, cfg.SessionToken = f.accessKey, f.secretKey, f.sessionToken
+	case f.sessionToken != "":
+		return cfg, errors.New("--session-token requires --access-key and --secret-key")
+	case f.profile != "" || getenv("AWS_PROFILE") != "":
+		cfg.AWSProfile = f.profile
+		if cfg.AWSProfile == "" {
+			cfg.AWSProfile = getenv("AWS_PROFILE")
+		}
+	default:
+		if ak, sk := getenv("AWS_ACCESS_KEY_ID"), getenv("AWS_SECRET_ACCESS_KEY"); ak != "" && sk != "" {
+			cfg.AccessKey, cfg.SecretKey, cfg.SessionToken = ak, sk, getenv("AWS_SESSION_TOKEN")
 		}
 	}
-	if cfg.AWSProfile == "" {
-		cfg.AWSProfile = os.Getenv("AWS_PROFILE")
-	}
-	if cfg.AccessKey == "" {
-		cfg.AccessKey = os.Getenv("AWS_ACCESS_KEY_ID")
-	}
-	if cfg.SecretKey == "" {
-		cfg.SecretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
-	}
-	if eksSessionToken != "" {
-		cfg.SessionToken = eksSessionToken
-	} else {
-		cfg.SessionToken = os.Getenv("AWS_SESSION_TOKEN")
-	}
+	return cfg, nil
+}
 
-	return cfg
+// resolveEKSRegion fills in cfg.Region from the AWS shared config (honouring
+// the selected profile) when neither the flag nor the environment set it.
+func resolveEKSRegion(cfg *provider.EKSConfig) error {
+	if cfg.Region == "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		var opts []func(*awsconfig.LoadOptions) error
+		if cfg.AWSProfile != "" {
+			opts = append(opts, awsconfig.WithSharedConfigProfile(cfg.AWSProfile))
+		}
+		awsCfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
+		if err != nil {
+			return fmt.Errorf("failed to load AWS config: %w", err)
+		}
+		cfg.Region = awsCfg.Region
+	}
+	if cfg.Region == "" {
+		return errors.New("region is required (use --region, set AWS_REGION, or configure a region for the AWS profile)")
+	}
+	return nil
+}
+
+// getEKSConfigFromFlags resolves the EKS configuration from flags, the
+// environment and the AWS shared config.
+func getEKSConfigFromFlags() (provider.EKSConfig, error) {
+	cfg, err := resolveEKSCredentials(eksFlagValues{
+		region:       eksRegion,
+		profile:      eksProfile,
+		accessKey:    eksAccessKey,
+		secretKey:    eksSecretKey,
+		sessionToken: eksSessionToken,
+	}, os.Getenv)
+	if err != nil {
+		return cfg, err
+	}
+	if err := resolveEKSRegion(&cfg); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
 }
 
 func runEKSList(cmd *cobra.Command, args []string) error {
-	cfg := getEKSConfigFromFlags()
-
-	if cfg.Region == "" {
-		return fmt.Errorf("region is required (use --region or set AWS_REGION)")
+	cfg, err := getEKSConfigFromFlags()
+	if err != nil {
+		return err
 	}
 
 	// Create EKS provider
@@ -190,8 +256,13 @@ func runEKSList(cmd *cobra.Command, args []string) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "NAME\tSTATUS\tREGION\tARN")
 	fmt.Fprintln(w, "----\t------\t------\t---")
+	var describeErrs []error
 	for _, cluster := range clusters {
 		arn := cluster.Description
+		if strings.HasPrefix(arn, provider.EKSDescribeFailedPrefix) {
+			describeErrs = append(describeErrs, fmt.Errorf("cluster %s: %s", cluster.Name, arn))
+			arn = "(describe failed, see warning)"
+		}
 		if len(arn) > 60 {
 			arn = arn[:57] + "..."
 		}
@@ -199,14 +270,16 @@ func runEKSList(cmd *cobra.Command, args []string) error {
 	}
 	w.Flush()
 
+	if failed := reportClusterFailures(errors.Join(describeErrs...), len(clusters)-len(describeErrs)); failed > 0 {
+		return fmt.Errorf("%d of %d clusters could not be described", failed, len(clusters))
+	}
 	return nil
 }
 
 func runEKSGenerate(cmd *cobra.Command, args []string) error {
-	cfg := getEKSConfigFromFlags()
-
-	if cfg.Region == "" {
-		return fmt.Errorf("region is required (use --region or set AWS_REGION)")
+	cfg, err := getEKSConfigFromFlags()
+	if err != nil {
+		return err
 	}
 
 	// Create EKS provider
@@ -215,6 +288,10 @@ func runEKSGenerate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create EKS provider: %w", err)
 	}
 	defer eksProvider.Close()
+
+	if eksProvider.EmbedsCredentials() {
+		fmt.Fprintln(os.Stderr, "Warning: the generated kubeconfig contains your AWS secret access key (and session token, if any) in plain text; use --profile to avoid this")
+	}
 
 	// List clusters
 	fmt.Fprintf(os.Stderr, "Fetching EKS clusters from %s...\n", cfg.Region)
@@ -231,7 +308,12 @@ func runEKSGenerate(cmd *cobra.Command, args []string) error {
 
 	// Get kubeconfigs for each cluster
 	kubeconfigs := make(map[string]string)
+	var fetchErrs []error
 	for _, cluster := range clusters {
+		if strings.HasPrefix(cluster.Description, provider.EKSDescribeFailedPrefix) {
+			fetchErrs = append(fetchErrs, fmt.Errorf("cluster %s: %s", cluster.Name, cluster.Description))
+			continue
+		}
 		if !strings.EqualFold(cluster.State, "ACTIVE") {
 			fmt.Fprintf(os.Stderr, "Skipping cluster %s (status: %s)\n", cluster.Name, cluster.State)
 			continue
@@ -239,14 +321,18 @@ func runEKSGenerate(cmd *cobra.Command, args []string) error {
 
 		kubeconfigYAML, err := eksProvider.GetKubeconfig(cluster.ID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to get kubeconfig for %s: %v\n", cluster.Name, err)
+			fetchErrs = append(fetchErrs, fmt.Errorf("cluster %s: %w", cluster.Name, err))
 			continue
 		}
 
 		kubeconfigs[cluster.Name] = kubeconfigYAML
 	}
 
+	failed := reportClusterFailures(errors.Join(fetchErrs...), len(kubeconfigs))
 	if len(kubeconfigs) == 0 {
+		if failed > 0 {
+			return fmt.Errorf("failed to fetch a kubeconfig for any of the %d active cluster(s)", failed)
+		}
 		return fmt.Errorf("no active clusters found")
 	}
 
@@ -259,7 +345,7 @@ func runEKSGenerate(cmd *cobra.Command, args []string) error {
 
 	// Output the kubeconfig
 	if eksOutput != "" {
-		if err := os.WriteFile(eksOutput, kubeconfigData, 0600); err != nil {
+		if err := writeOutputFile(eksOutput, kubeconfigData); err != nil {
 			return fmt.Errorf("failed to write kubeconfig to %s: %w", eksOutput, err)
 		}
 		fmt.Fprintf(os.Stderr, "Kubeconfig written to %s\n", eksOutput)
@@ -267,6 +353,9 @@ func runEKSGenerate(cmd *cobra.Command, args []string) error {
 		fmt.Print(string(kubeconfigData))
 	}
 
+	if failed > 0 {
+		return partialError(failed, len(kubeconfigs))
+	}
 	return nil
 }
 

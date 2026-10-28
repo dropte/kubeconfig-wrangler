@@ -19,20 +19,20 @@
     "build:mac": "electron-builder --mac",
     "build:win": "electron-builder --win",
     "build:linux": "electron-builder --linux",
-    "pack": "electron-builder --dir"
+    "pack": "electron-builder --dir",
+    "test": "node --test test/"
   },
   "dependencies": {
-    "electron-store": "^8.1.0",
-    "electron-updater": "^6.6.2"
+    "electron-updater": "^6.8.11"
   },
   "devDependencies": {
-    "@electron/notarize": "^2.2.1",
-    "electron": "^28.0.0",
-    "electron-builder": "^24.9.1"
+    "electron": "^45.1.0",
+    "electron-builder": "^26.18.0"
   },
   "build": {
     "appId": "com.kubeconfig-wrangler",
     "productName": "Kubeconfig Wrangler",
+    "artifactName": "${name}-${version}-${arch}.${ext}",
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -42,7 +42,8 @@
       "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
       "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}",
       "!**/node_modules/*.d.ts",
-      "!**/node_modules/.bin"
+      "!**/node_modules/.bin",
+      "!test${/*}"
     ],
     "extraResources": [
       {
@@ -55,13 +56,28 @@
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
-      "target": ["dmg", "zip"],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
       "icon": "build/icon.icns",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
-      "notarize": false
+      "notarize": true
     },
     "win": {
       "target": "nsis",
@@ -85,7 +101,7 @@
       "provider": "github",
       "owner": "dropte",
       "repo": "kubeconfig-wrangler",
-      "releaseType": "release"
+      "releaseType": "draft"
     }
   }
 }

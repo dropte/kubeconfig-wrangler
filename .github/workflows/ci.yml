@@ -7,44 +7,59 @@ on:
     branches: [main, master, develop]
   workflow_dispatch:  # Allow manual triggering
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v3
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v2.15
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Check Electron sources
+        working-directory: electron
+        run: |
+          node --check main.js
+          node --check preload.js
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
 
-      - name: Get dependencies
-        run: go mod download
+      - name: Vet
+        run: go vet ./...
 
       - name: Run tests
-        run: go test -v -race -coverprofile=coverage.out ./...
+        run: go test -race -coverprofile=coverage.out ./...
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v5
         with:
           files: ./coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
   build-cli:
@@ -59,12 +74,12 @@ jobs:
           - goos: windows
             goarch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
 
       - name: Build
         env:
@@ -80,7 +95,7 @@ jobs:
             -o bin/kubeconfig-wrangler-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} .
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kubeconfig-wrangler-${{ matrix.goos }}-${{ matrix.goarch }}
           path: bin/kubeconfig-wrangler-*
@@ -89,37 +104,16 @@ jobs:
     name: Build CLI (macOS)
     runs-on: macos-latest
     needs: [lint, test]
-    env:
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     strategy:
       matrix:
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.21'
-
-      - name: Import Code Signing Certificate
-        if: ${{ env.APPLE_CERTIFICATE != '' }}
-        run: |
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
-          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
-          echo "SIGNING_IDENTITY=$IDENTITY" >> $GITHUB_ENV
+          go-version-file: go.mod
 
       - name: Build
         env:
@@ -130,27 +124,8 @@ jobs:
           go build -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ github.sha }}" \
             -o bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }} .
 
-      - name: Sign Binary
-        if: ${{ env.SIGNING_IDENTITY != '' }}
-        run: |
-          codesign --force --options runtime --sign "$SIGNING_IDENTITY" \
-            bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }}
-          codesign --verify --verbose bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }}
-
-      - name: Notarize Binary
-        if: ${{ env.APPLE_ID != '' && env.SIGNING_IDENTITY != '' }}
-        run: |
-          cd bin
-          zip kubeconfig-wrangler-darwin-${{ matrix.goarch }}.zip kubeconfig-wrangler-darwin-${{ matrix.goarch }}
-          xcrun notarytool submit kubeconfig-wrangler-darwin-${{ matrix.goarch }}.zip \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait || echo "Notarization failed, continuing..."
-          rm kubeconfig-wrangler-darwin-${{ matrix.goarch }}.zip
-
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kubeconfig-wrangler-darwin-${{ matrix.goarch }}
           path: bin/kubeconfig-wrangler-darwin-${{ matrix.goarch }}
@@ -159,36 +134,28 @@ jobs:
     name: Build Electron App
     runs-on: ${{ matrix.os }}
     needs: [lint, test]
-    env:
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             platform: linux
-            goarch: amd64
           - os: macos-latest
             platform: darwin
-            goarch: amd64
           - os: windows-latest
             platform: windows
-            goarch: amd64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: electron/package-lock.json
 
@@ -196,24 +163,31 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           mkdir -p bin/linux
-          GOOS=linux GOARCH=${{ matrix.goarch }} \
+          GOOS=linux GOARCH=amd64 \
             go build -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ github.sha }}" \
             -o bin/linux/kubeconfig-wrangler .
 
-      - name: Build Go backend (macOS)
+      # The macOS app ships for both Apple Silicon and Intel, so the backend
+      # must be a universal binary.
+      - name: Build Go backend (macOS, universal)
         if: matrix.platform == 'darwin'
         run: |
-          mkdir -p bin/mac
-          GOOS=darwin GOARCH=${{ matrix.goarch }} \
-            go build -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ github.sha }}" \
-            -o bin/mac/kubeconfig-wrangler .
+          mkdir -p bin/mac bin/darwin-amd64 bin/darwin-arm64
+          for arch in amd64 arm64; do
+            GOOS=darwin GOARCH=$arch \
+              go build -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ github.sha }}" \
+              -o bin/darwin-$arch/kubeconfig-wrangler .
+          done
+          lipo -create -output bin/mac/kubeconfig-wrangler \
+            bin/darwin-amd64/kubeconfig-wrangler bin/darwin-arm64/kubeconfig-wrangler
+          lipo -info bin/mac/kubeconfig-wrangler
 
       - name: Build Go backend (Windows)
         if: matrix.platform == 'windows'
         shell: bash
         run: |
           mkdir -p bin/win
-          GOOS=windows GOARCH=${{ matrix.goarch }} \
+          GOOS=windows GOARCH=amd64 \
             go build -ldflags "-X github.com/kubeconfig-wrangler/cmd.Version=${{ github.sha }}" \
             -o bin/win/kubeconfig-wrangler.exe .
 
@@ -221,62 +195,31 @@ jobs:
         working-directory: electron
         run: npm ci
 
+      - name: Audit Electron dependencies
+        if: matrix.platform == 'linux'
+        working-directory: electron
+        run: npm audit --audit-level=high
+        continue-on-error: true  # informational only; never blocks CI
+
       - name: Build Electron app (Linux)
         if: matrix.platform == 'linux'
         working-directory: electron
         run: npm run build:linux -- --publish never
 
-      - name: Import Code Signing Certificate (macOS)
-        if: matrix.platform == 'darwin' && env.APPLE_CERTIFICATE != ''
-        run: |
-          # Create a temporary keychain
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
-
-          # Create keychain
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          # Import certificate
-          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
-          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
-
-          # Allow codesign to access the certificate
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
+      # CI builds are signed when the certificate secret is available (not on
+      # fork PRs) but never notarized; notarization happens in release.yml.
       - name: Build Electron app (macOS)
         if: matrix.platform == 'darwin'
         working-directory: electron
-        run: npm run build:mac -- --publish never
         env:
           CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-
-      - name: Notarize macOS app
-        if: matrix.platform == 'darwin' && env.APPLE_ID != ''
-        working-directory: electron
         run: |
-          # Find the DMG file (notarytool requires zip, pkg, or dmg - not .app directly)
-          DMG_PATH=$(find dist -name "*.dmg" -type f | head -1)
-          if [ -z "$DMG_PATH" ]; then
-            echo "No .dmg file found, skipping notarization"
-            exit 0
+          if [ -z "$CSC_LINK" ]; then
+            unset CSC_LINK CSC_KEY_PASSWORD
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
           fi
-
-          echo "Notarizing $DMG_PATH..."
-
-          # Submit for notarization
-          xcrun notarytool submit "$DMG_PATH" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait || { echo "Notarization failed, continuing anyway..."; exit 0; }
-
-          # Staple the ticket to the DMG
-          echo "Stapling notarization ticket to $DMG_PATH..."
-          xcrun stapler staple "$DMG_PATH" || echo "Stapling failed, continuing anyway..."
+          npm run build:mac -- --publish never
 
       - name: Build Electron app (Windows)
         if: matrix.platform == 'windows'
@@ -284,14 +227,14 @@ jobs:
         run: npm run build:win -- --publish never
 
       - name: Upload Electron artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: electron-${{ matrix.platform }}
           path: |
-            electron/dist/*.dmg
-            electron/dist/*.zip
-            electron/dist/*.AppImage
-            electron/dist/*.deb
-            electron/dist/*.rpm
-            electron/dist/*.exe
-          if-no-files-found: ignore
+            electron/dist/kubeconfig-wrangler-*.dmg
+            electron/dist/kubeconfig-wrangler-*.zip
+            electron/dist/kubeconfig-wrangler-*.AppImage
+            electron/dist/kubeconfig-wrangler-*.deb
+            electron/dist/kubeconfig-wrangler-*.rpm
+            electron/dist/kubeconfig-wrangler-*.exe
+          if-no-files-found: error

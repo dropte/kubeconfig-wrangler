@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -120,9 +121,21 @@ func LoadFromEnv() *Config {
 		Password:              os.Getenv("RANCHER_PASSWORD"),
 		ClusterPrefix:         os.Getenv("RANCHER_CLUSTER_PREFIX"),
 		OutputPath:            os.Getenv("RANCHER_KUBECONFIG_OUTPUT"),
-		InsecureSkipTLSVerify: os.Getenv("RANCHER_INSECURE_SKIP_TLS_VERIFY") == "true",
+		InsecureSkipTLSVerify: ParseBoolEnv(os.Getenv("RANCHER_INSECURE_SKIP_TLS_VERIFY")),
 		CACert:                os.Getenv("RANCHER_CA_CERT"),
 	}
+}
+
+// ParseBoolEnv interprets a boolean environment variable value. It accepts
+// everything strconv.ParseBool does plus "yes", case-insensitively; empty or
+// unrecognised values are false.
+func ParseBoolEnv(value string) bool {
+	v := strings.ToLower(strings.TrimSpace(value))
+	if v == "yes" {
+		return true
+	}
+	b, err := strconv.ParseBool(v)
+	return err == nil && b
 }
 
 // GetBasicAuth returns the basic auth credentials for the Rancher API

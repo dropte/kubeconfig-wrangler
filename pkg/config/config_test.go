@@ -1,7 +1,6 @@
 package config
 
 import (
-	"os"
 	"testing"
 )
 
@@ -283,23 +282,10 @@ func TestLoadFromEnv(t *testing.T) {
 		"RANCHER_CA_CERT":                  "/path/to/ca.crt",
 	}
 
-	// Save original values and set test values
-	originalValues := make(map[string]string)
+	// t.Setenv restores the original values when the test ends.
 	for key, value := range envVars {
-		originalValues[key] = os.Getenv(key)
-		os.Setenv(key, value)
+		t.Setenv(key, value)
 	}
-
-	// Restore original values after test
-	defer func() {
-		for key, value := range originalValues {
-			if value == "" {
-				os.Unsetenv(key)
-			} else {
-				os.Setenv(key, value)
-			}
-		}
-	}()
 
 	cfg := LoadFromEnv()
 
@@ -336,24 +322,37 @@ func TestLoadFromEnv(t *testing.T) {
 }
 
 func TestLoadFromEnv_InsecureSkipTLSVerify_False(t *testing.T) {
-	originalValue := os.Getenv("RANCHER_INSECURE_SKIP_TLS_VERIFY")
-	defer func() {
-		if originalValue == "" {
-			os.Unsetenv("RANCHER_INSECURE_SKIP_TLS_VERIFY")
-		} else {
-			os.Setenv("RANCHER_INSECURE_SKIP_TLS_VERIFY", originalValue)
-		}
-	}()
-
-	os.Setenv("RANCHER_INSECURE_SKIP_TLS_VERIFY", "false")
+	t.Setenv("RANCHER_INSECURE_SKIP_TLS_VERIFY", "false")
 	cfg := LoadFromEnv()
 	if cfg.InsecureSkipTLSVerify {
 		t.Error("InsecureSkipTLSVerify should be false when set to 'false'")
 	}
 
-	os.Setenv("RANCHER_INSECURE_SKIP_TLS_VERIFY", "")
+	t.Setenv("RANCHER_INSECURE_SKIP_TLS_VERIFY", "")
 	cfg = LoadFromEnv()
 	if cfg.InsecureSkipTLSVerify {
 		t.Error("InsecureSkipTLSVerify should be false when empty")
+	}
+}
+
+func TestParseBoolEnv(t *testing.T) {
+	cases := map[string]bool{
+		"true": true, "TRUE": true, "True": true, "1": true, "t": true, "T": true,
+		"yes": true, "YES": true, " true ": true,
+		"false": false, "0": false, "no": false, "": false, "maybe": false, "2": false,
+	}
+	for in, want := range cases {
+		if got := ParseBoolEnv(in); got != want {
+			t.Errorf("ParseBoolEnv(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestLoadFromEnv_InsecureSkipTLSVerify_Variants(t *testing.T) {
+	for _, v := range []string{"1", "TRUE", "yes"} {
+		t.Setenv("RANCHER_INSECURE_SKIP_TLS_VERIFY", v)
+		if !LoadFromEnv().InsecureSkipTLSVerify {
+			t.Errorf("RANCHER_INSECURE_SKIP_TLS_VERIFY=%q should enable skip-verify", v)
+		}
 	}
 }

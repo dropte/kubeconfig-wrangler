@@ -3,13 +3,16 @@ package rancher
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/kubeconfig-wrangler/pkg/config"
@@ -46,7 +49,7 @@ type Cluster struct {
 	State       string `json:"state"`
 	Provider    string `json:"provider"`
 	Links       struct {
-		Self             string `json:"self"`
+		Self               string `json:"self"`
 		GenerateKubeconfig string `json:"generateKubeconfig"`
 	} `json:"links"`
 	Actions struct {
@@ -83,13 +86,19 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		tlsConfig.RootCAs = caCertPool
 	}
 
-	transport := &http.Transport{
-		TLSClientConfig: tlsConfig,
-	}
+	// Clone the default transport to keep proxy-from-environment, dial/TLS
+	// timeouts and idle connection reaping.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsConfig
 
 	httpClient := &http.Client{
 		Transport: transport,
 		Timeout:   30 * time.Second,
+		// Do not follow redirects: a 301/302 would silently turn the
+		// generateKubeconfig POST into a GET. Surface it as a non-200 error.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 
 	client := &Client{
@@ -120,7 +129,7 @@ func (c *Client) login() error {
 		return fmt.Errorf("failed to marshal login request: %w", err)
 	}
 
-	// Try local authentication first
+	// Only Rancher local accounts are supported for password login.
 	url := fmt.Sprintf("%s/v3-public/localProviders/local?action=login", c.config.RancherURL)
 
 	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
@@ -138,7 +147,7 @@ func (c *Client) login() error {
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("login failed: status %d, body: %s", resp.StatusCode, string(bodyBytes))
+		return fmt.Errorf("login failed: status %d, body: %s (%s)", resp.StatusCode, string(bodyBytes), LocalLoginHint)
 	}
 
 	var loginResp LoginResponse
@@ -152,6 +161,44 @@ func (c *Client) login() error {
 
 	c.bearerToken = loginResp.Token
 	return nil
+}
+
+// LocalLoginHint explains the limits of username/password login.
+const LocalLoginHint = "username/password login only supports Rancher local accounts; " +
+	"for external auth providers (AD, LDAP, SAML, OIDC, GitHub) use an API token instead"
+
+// logoutTimeout bounds the best-effort logout performed by Close.
+const logoutTimeout = 5 * time.Second
+
+// Close logs out the session token obtained by a password login (Rancher
+// otherwise keeps it alive server-side) and releases idle connections.
+// Logout is best effort; errors are ignored. Close is safe to call twice.
+func (c *Client) Close() error {
+	if c.bearerToken != "" {
+		logout(c.httpClient, c.config.RancherURL, c.bearerToken)
+		c.bearerToken = ""
+	}
+	c.httpClient.CloseIdleConnections()
+	return nil
+}
+
+// logout revokes a Rancher bearer token via POST /v3/tokens?action=logout.
+func logout(httpClient *http.Client, baseURL, bearer string) {
+	ctx, cancel := context.WithTimeout(context.Background(), logoutTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v3/tokens?action=logout", nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	req.Header.Set("Accept", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 }
 
 // doRequest performs an HTTP request with authentication
@@ -228,11 +275,19 @@ func (c *Client) GetClusterKubeconfig(cluster *Cluster) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&kubeconfigResp); err != nil {
 		return "", fmt.Errorf("failed to decode kubeconfig response: %w", err)
 	}
+	if strings.TrimSpace(kubeconfigResp.Config) == "" {
+		return "", fmt.Errorf("rancher returned an empty kubeconfig for cluster %s", cluster.Name)
+	}
 
 	return kubeconfigResp.Config, nil
 }
 
-// GetAllKubeconfigs retrieves kubeconfigs for all active clusters
+// GetAllKubeconfigs retrieves kubeconfigs for all active clusters.
+//
+// If listing clusters fails, it returns a nil map and the error. Otherwise it
+// returns every kubeconfig it could fetch; when some clusters failed, the
+// error is an errors.Join of one error per failed cluster, alongside the
+// partial map.
 func (c *Client) GetAllKubeconfigs() (map[string]string, error) {
 	clusters, err := c.ListClusters()
 	if err != nil {
@@ -240,6 +295,7 @@ func (c *Client) GetAllKubeconfigs() (map[string]string, error) {
 	}
 
 	kubeconfigs := make(map[string]string)
+	var errs []error
 	for _, cluster := range clusters {
 		// Skip clusters that are not active
 		if cluster.State != "active" {
@@ -248,13 +304,12 @@ func (c *Client) GetAllKubeconfigs() (map[string]string, error) {
 
 		kubeconfig, err := c.GetClusterKubeconfig(&cluster)
 		if err != nil {
-			// Log the error but continue with other clusters
-			fmt.Fprintf(os.Stderr, "Warning: failed to get kubeconfig for cluster %s: %v\n", cluster.Name, err)
+			errs = append(errs, fmt.Errorf("cluster %s: %w", cluster.Name, err))
 			continue
 		}
 
 		kubeconfigs[cluster.Name] = kubeconfig
 	}
 
-	return kubeconfigs, nil
+	return kubeconfigs, errors.Join(errs...)
 }
