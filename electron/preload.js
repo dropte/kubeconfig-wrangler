@@ -1,10 +1,10 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-// Expose protected methods to the renderer process
+// Expose a minimal API to the renderer. File access goes through a native
+// dialog in the main process; the page never passes file paths.
 contextBridge.exposeInMainWorld('electronAPI', {
-  showSaveDialog: (options) => ipcRenderer.invoke('show-save-dialog', options),
-  saveFile: (filePath, content) => ipcRenderer.invoke('save-file', { filePath, content }),
-  showOpenDialog: (options) => ipcRenderer.invoke('show-open-dialog', options),
-  readFile: (filePath) => ipcRenderer.invoke('read-file', { filePath }),
+  openKubeconfigFile: () => ipcRenderer.invoke('open-kubeconfig-file'),
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  getVersion: () => ipcRenderer.invoke('get-app-version'),
   platform: process.platform
 });
