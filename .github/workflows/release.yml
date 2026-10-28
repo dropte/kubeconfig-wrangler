@@ -90,6 +90,9 @@ jobs:
           name: Release ${{ needs.verify.outputs.tag }}
           draft: true
           prerelease: false
+          # GitHub appends notes generated from the pull requests merged
+          # since the previous tag below the download list.
+          generate_release_notes: true
           body: |
             ## Kubeconfig Wrangler ${{ needs.verify.outputs.tag }}
 
@@ -106,9 +109,6 @@ jobs:
             - **Linux**: AppImage, .deb, .rpm
             - **macOS**: .dmg / .zip for Apple Silicon (arm64) and Intel (x64), signed and notarized
             - **Windows**: .exe installer
-
-            ### Changelog
-            <!-- Add changelog here -->
 
   build-cli:
     name: Build CLI
